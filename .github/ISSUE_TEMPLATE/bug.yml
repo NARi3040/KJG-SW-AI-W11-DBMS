@@ -4,7 +4,7 @@ title: "[Phase ] "
 body:
   - type: markdown
     attributes:
-      value: 제목의 Phase 번호를 채우고, 오른쪽 메뉴에서 해당 Phase 마일스톤을 지정해 주세요.
+      value: 제목의 Phase 번호를 채워 주세요.
   - type: textarea
     id: symptom
     attributes:

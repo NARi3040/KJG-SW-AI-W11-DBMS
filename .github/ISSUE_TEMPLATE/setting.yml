@@ -3,7 +3,7 @@ description: 저장소 설정, CI, 템플릿, 협업 문서 변경
 body:
   - type: markdown
     attributes:
-      value: Phase와 마일스톤은 필요 없어요.
+      value: 제목에 Phase는 붙이지 않아요.
   - type: textarea
     id: change
     attributes:
