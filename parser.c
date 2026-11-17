@@ -230,7 +230,7 @@ static int parse_literal(Parser *p, Value *out) {
         out->i = p->cur.i;
     } else if (p->cur.kind == TOK_STRING) {
         out->type = VALUE_STRING;
-        memcpy(out->s, p->cur.s, sizeof out->s);
+        memcpy(out->s, p->cur.s, strlen(p->cur.s) + 1);  // 이전 토큰의 바이트를 끌고 오지 않게 길이만큼만
     } else {
         error_near(p, "value");
         return 0;
@@ -247,7 +247,10 @@ static int parse_insert(Parser *p, Command *out) {
         return 0;
     for (;;) {
         if (out->value_count == DB_VALUES_MAX) {
-            set_error(p, "too many values (max %d)", DB_VALUES_MAX);
+            if (p->cur.kind == TOK_INT || p->cur.kind == TOK_STRING)
+                set_error(p, "too many values (max %d)", DB_VALUES_MAX);
+            else
+                error_near(p, "value");  // (1,...,1,) 처럼 끝의 쉼표가 원인
             return 0;
         }
         if (!parse_literal(p, &out->values[out->value_count])) return 0;

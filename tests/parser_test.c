@@ -32,6 +32,9 @@ static DbStatus parse_bytes(Run *r, const char *sql, size_t length) {
         exit(2);
     }
     memcpy(buf, sql, length);
+    // 0 채우기와 NUL 종료를 parse_next가 직접 하는지 보려고 쓰레기 값으로 채워요.
+    memset(&r->cmd, 0xAA, sizeof r->cmd);
+    memset(r->error, 'X', sizeof r->error);
     DbStatus st = parse_next(buf, length, &r->cursor, &r->cmd, r->error);
     free(buf);
     return st;
@@ -156,6 +159,27 @@ static void test_doc_cases(void) {
     CHECK("T-20", syntax_error(&r, st, "unexpected character '-'"));
 }
 
+// 4장 표: 같은 입력으로 끝까지 부른 반환값 순서
+static int sequence(const char *sql, const DbStatus *expected, size_t n) {
+    Run r = {0};
+    for (size_t k = 0; k < n; k++)
+        if (parse(&r, sql) != expected[k]) return 0;
+    return 1;
+}
+
+static void test_statement_boundaries(void) {
+    const DbStatus ok_ok_end[] = {DB_OK, DB_OK, DB_END};
+    const DbStatus ok_end[] = {DB_OK, DB_END};
+    const DbStatus end[] = {DB_END};
+    const DbStatus ok_syntax[] = {DB_OK, DB_ERR_SYNTAX};
+    CHECK("B-1", sequence("SELECT * FROM users; SELECT * FROM users;", ok_ok_end, 3));
+    CHECK("B-2", sequence("SELECT * FROM users", ok_end, 2));
+    CHECK("B-3", sequence(";; SELECT * FROM users;", ok_end, 2));
+    CHECK("B-4", sequence("INSERT INTO users VALUES ('a;b', 1);", ok_end, 2));
+    CHECK("B-5", sequence(" \t\r\n ", end, 1));
+    CHECK("B-6", sequence("SELECT * FROM users; INSERT INTO users VALUES ('a", ok_syntax, 2));
+}
+
 // docs/test.md 3장
 static void test_unit_cases(void) {
     Run r = {0};
@@ -233,6 +257,22 @@ static void test_doc_rules(void) {
     st = parse_once(&r, "SELECT # 'a;b'; SELECT * FROM users");
     CHECK("R-skip-quoted-semicolon", syntax_error(&r, st, "unexpected character '#'") && r.cursor == 15);
 
+    st = parse_once(&r, "INSERT INTO users VALUES (1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,)");
+    CHECK("R-16-values-trailing-comma", syntax_error(&r, st, "near ')': expected value"));
+
+    // 값 버퍼에는 값 길이 뒤로 이전 토큰(긴 테이블 이름)의 바이트가 남지 않아요.
+    static const char zeros[DB_STRING_MAX + 1];
+    st = parse_once(&r, "INSERT INTO users_long_name VALUES ('a')");
+    CHECK("R-value-no-stale-bytes", st == DB_OK && memcmp(r.cmd.values[0].s, "a", 2) == 0 &&
+                                        memcmp(r.cmd.values[0].s + 2, zeros, DB_STRING_MAX - 1) == 0);
+
+    snprintf(sql, sizeof sql, "INSERT INTO users VALUES ('%0300d", 0);
+    memset(sql + 27, 'a', 300);
+    CHECK("R-too-long-before-unterminated", syntax_error(&r, parse_once(&r, sql), "string too long (max 255 bytes)"));
+
+    st = parse_once(&r, "-- comment\nSELECT * FROM users");
+    CHECK("R-no-comments", syntax_error(&r, st, "unexpected character '-'"));
+
     // 오류 뒤 DB_END: 명령은 0, 오류 문자열은 비어 있어요.
     const char *tail = "SELECT * FORM users;  ;\n";
     r.cursor = 0;
@@ -244,6 +284,7 @@ static void test_doc_rules(void) {
 
 int main(void) {
     test_doc_cases();
+    test_statement_boundaries();
     test_unit_cases();
     test_doc_rules();
     printf("%s: %d failed\n", failures ? "FAIL" : "PASS", failures);
