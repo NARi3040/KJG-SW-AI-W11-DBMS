@@ -143,7 +143,7 @@ static DbStatus print_row(const Row *row, void *user_data);
 
 | 함수 | 주요 입력 | 직접 반환값 | 출력·상태 변화 |
 | --- | --- | --- | --- |
-| `parse_next()` | SQL 문자열, 바이트 길이, 현재 커서, 호출자의 `Command *out`과 오류 버퍼 | 명령 생성 `DB_OK`, 정상 끝 `DB_END`, 문법 오류 `DB_ERR_SYNTAX` | 성공 시 명령을 채우고 커서 전진. 오류와 `DB_END`에서는 `out`의 필드를 0으로 초기화. 문법 오류에는 NUL로 끝난 오류 메시지, 그 외에는 빈 오류 문자열 |
+| `parse_next()` | SQL 문자열, 바이트 길이, 현재 커서, 호출자의 `Command *out`과 오류 버퍼 | 명령 생성 `DB_OK`, 정상 끝 `DB_END`, 문법 오류 `DB_ERR_SYNTAX` | 성공 시 명령을 채우고 커서 전진. 오류와 `DB_END`에서는 `out`의 필드를 0으로 초기화. 문법 오류에는 줄바꿈 없이 NUL로 끝난 영어 한 줄 오류 메시지, 그 외에는 빈 오류 문자열 |
 | `execute()` | 열린 저장 상태, 명령, 콜백, `user_data`, `out_result` | `DB_OK` 또는 검증·저장·콜백 오류 | INSERT 성공 시 저장 결과. SELECT는 조건에 맞아 외부 콜백이 성공한 행 수이며 중간 실패 시 일부 행 수 |
 | `storage_open()` | 고정 저장 경로, `out_storage` | `DB_OK` 또는 파일·형식·초기화 오류 | 성공 시 열린 상태와 다음 ID 준비. 실패 시 `*out_storage = NULL` |
 | `storage_insert()` | 열린 저장 상태, 검증된 `name`·`age`, `out_result` | `DB_OK` 또는 범위·파일·기록 결과 불확실 오류 | 성공 시 기존 행을 보존하며 새 행 추가, ID·레코드 위치 반환과 다음 ID 갱신. 오류 시 결과는 사용하지 않음 |
