@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 import run_tests
+import test_cli
 import test_integration
 
 
@@ -29,9 +30,19 @@ class CompilerLookupTests(unittest.TestCase):
             "shutil.which", return_value=None
         ) as which:
             self.assertIsNone(run_tests.resolve_gcc())
-            with self.assertRaises(RuntimeError):
-                test_integration._gcc()
+            for resolve in (test_integration._gcc, test_cli._gcc):
+                with self.assertRaises(RuntimeError):
+                    resolve()
         which.assert_called_with("definitely-not-gcc")
+
+    def test_explicit_gcc_is_used(self):
+        with mock.patch.dict(os.environ, {"GCC": "clang"}), mock.patch(
+            "shutil.which", return_value="/opt/bin/clang"
+        ) as which:
+            self.assertEqual(run_tests.resolve_gcc(), "/opt/bin/clang")
+            self.assertEqual(test_integration._gcc(), "/opt/bin/clang")
+            self.assertEqual(test_cli._gcc(), "/opt/bin/clang")
+        which.assert_called_with("clang")
 
     def test_path_gcc_is_used(self):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
@@ -39,6 +50,18 @@ class CompilerLookupTests(unittest.TestCase):
         ):
             self.assertEqual(run_tests.resolve_gcc(), "/usr/bin/gcc")
             self.assertEqual(test_integration._gcc(), "/usr/bin/gcc")
+            self.assertEqual(test_cli._gcc(), "/usr/bin/gcc")
+
+    def test_missing_gcc_fails_clearly(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "shutil.which", return_value=None
+        ) as which:
+            self.assertIsNone(run_tests.resolve_gcc())
+            for resolve in (test_integration._gcc, test_cli._gcc):
+                with self.assertRaises(RuntimeError) as raised:
+                    resolve()
+                self.assertIn("gcc not found", str(raised.exception))
+        which.assert_called_with("gcc")
 
 
 class StatementErrorTests(unittest.TestCase):
