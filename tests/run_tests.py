@@ -133,7 +133,18 @@ def main():
             [ROOT / "parser.c", TESTS / "test_parser.c"],
             build_dir,
         )
+        compile_and_run(
+            "parser_regression",
+            [ROOT / "parser.c", TESTS / "parser_test.c"],
+            build_dir,
+        )
         with tempfile.TemporaryDirectory(prefix="dbms_storage_") as storage_cwd:
+            compile_and_run(
+                "storage_regression",
+                [TESTS / "storage_test.c"],
+                build_dir,
+                run_cwd=pathlib.Path(storage_cwd),
+            )
             compile_and_run(
                 "storage_s01_s02",
                 [ROOT / "storage.c", TESTS / "test_storage.c"],
