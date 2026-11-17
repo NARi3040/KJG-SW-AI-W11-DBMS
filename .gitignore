@@ -1,0 +1,27 @@
+# 빌드와 테스트 결과물
+/minidb
+build/
+*.o
+
+# 실행하면 생기는 테이블 파일
+data/
+
+# 환경 변수와 비밀 정보
+.env
+.env.*
+!.env.example
+
+# 로그
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 편집기
+.vscode/
+.idea/
+
+# AI 도구의 로컬 상태
+.omc/
+.claude/settings.local.json

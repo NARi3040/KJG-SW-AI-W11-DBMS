@@ -1,0 +1,41 @@
+name: 버그 제보
+description: 의도와 다르게 동작하는 문제
+title: "[Phase ] "
+body:
+  - type: markdown
+    attributes:
+      value: 제목의 Phase 번호를 채우고, 오른쪽 메뉴에서 해당 Phase 마일스톤을 지정해 주세요.
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 증상
+      description: 실제로 어떻게 동작하는지. 출력이나 오류 메시지를 그대로 붙여 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 절차
+      description: 실행한 명령과 SQL 파일 내용
+      value: "1. "
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대 동작
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 환경
+      value: |
+        - OS:
+        - 컴파일러 (`cc --version`):
+        - 커밋 (`git rev-parse --short HEAD`):
+  - type: textarea
+    id: notes
+    attributes:
+      label: 참고
+      description: Sanitizer 출력, 관련 이슈

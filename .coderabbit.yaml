@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# 기본값(chill 프로필, Draft 제외, push마다 추가 리뷰, 커밋 5개 리뷰 뒤 자동 중지)은 적지 않아요.
+# AGENTS.md와 CLAUDE.md는 CodeRabbit이 코딩 규칙으로 자동으로 읽어요.
+language: ko-KR
+tone_instructions: "한국어 해요체로 짧게 써요."
+reviews:
+  path_instructions:
+    - path: "src/**/*.{c,h}"
+      instructions: |
+        docs/design/의 해당 설계 문서, 특히 테이블 파일 형식과 Statement 구조와 다르게 구현한 곳을 지적해요.
+        버퍼 경계, 정수 범위, 파일 입출력 반환값 확인, 메모리·파일 핸들 누수를 확인해요.
+        전역 변수나 static 버퍼로 상태를 두는지, Phase 3에서 여러 스레드가 함께 쓸 때 경쟁 조건이 생기는지 확인해요.
+    - path: "tests/**"
+      instructions: |
+        엣지 케이스(빈 테이블, 최대 길이 값, 범위를 넘는 정수, 닫히지 않은 문자열)가 빠졌는지 확인해요.
+    - path: "docs/**/*.md"
+      instructions: |
+        docs/technical-writing-principles.md의 원칙과 docs/PLANNING.md의 요구사항 ID를 기준으로 봐요.

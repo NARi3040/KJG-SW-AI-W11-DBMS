@@ -1,0 +1,23 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{c,h,sh}]
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.md]
+trim_trailing_whitespace = false
+
+# SQL 테스트 기대 출력은 한 글자도 바꾸지 않아요.
+[tests/sql/*.out]
+trim_trailing_whitespace = false
+insert_final_newline = unset
