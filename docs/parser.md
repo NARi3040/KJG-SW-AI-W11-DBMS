@@ -290,4 +290,4 @@ static void skip_to_statement_end(Parser *p); // 오류 뒤 커서를 다음 문
 
 | 항목 | 내용 | 같이 정할 사람 |
 | --- | --- | --- |
-| `DbStatus` 정의 | `DB_OK`, `DB_END`, `DB_ERR_SYNTAX` 이름은 사용해요. 나머지 오류 상수와 enum의 수치 값은 공통 헤더에서 맞춰요 | 전원 |
+| `DbStatus` 정의 | `DB_OK`, `DB_END`, `DB_ERR_SYNTAX` 이름은 사용해요. 나머지 상태와 수치는 [`dbms.h`](../dbms.h) 및 [공통 헤더 초안](architecture.md#이슈-4의-공통-헤더-초안)을 이슈 #4에서 검토해요 | 전원 |
