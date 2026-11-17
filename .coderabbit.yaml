@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# 기본값(chill 프로필, Draft 제외, push마다 추가 리뷰, 커밋 5개 리뷰 뒤 자동 중지)은 적지 않아요.
+language: ko-KR
+tone_instructions: "한국어 해요체로 짧게 써요."
+reviews:
+  path_instructions:
+    - path: "**/*.{c,h}"
+      instructions: |
+        docs/의 설계 문서와 다르게 구현한 곳을 지적해요.
+        버퍼 경계, 정수 범위, 파일 입출력 반환값 확인, 메모리·파일 핸들 누수를 확인해요.
+        전역 변수나 static 버퍼로 상태를 두는지, Phase 3에서 여러 스레드가 함께 쓸 때 경쟁 조건이 생기는지 확인해요.
+    - path: "docs/**/*.md"
+      instructions: |
+        구현자가 추측해야 하는 곳(입력·출력 형식, 바이트 배치, 오류 처리, 엣지 케이스가 빠진 곳)을 먼저 지적해요.
