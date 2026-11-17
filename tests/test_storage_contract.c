@@ -1,5 +1,5 @@
 /*
- * test_storage.c - S01/S02 storage contract checks
+ * test_storage_contract.c - S01/S02 storage contract checks
  *
  * Uses the relative path "users.sans" only. Run this executable in an empty
  * temporary working directory (tests/run_tests.py does that).

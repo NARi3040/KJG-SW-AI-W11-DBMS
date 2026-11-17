@@ -16,17 +16,50 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCES = ("main.c", "parser.c", "execute.c", "storage.c")
 ERROR_LINE = re.compile(r"^statement (\d+): ([a-z-]+): (.+)$")
+BUILD_TIMEOUT = 300
+RUN_TIMEOUT = 300  # the 128MiB CLI cases read and parse a large file
 
 
 def _gcc():
     configured = os.environ.get("GCC")
-    candidates = [configured] if configured else []
-    candidates.append(r"C:\ProgramData\mingw64\mingw64\bin\gcc.exe")
-    candidates.append(shutil.which("gcc"))
-    for candidate in candidates:
-        if candidate and pathlib.Path(candidate).is_file():
-            return str(candidate)
-    raise RuntimeError("gcc not found; set GCC or install gcc")
+    if configured:
+        found = shutil.which(configured)
+        if found is None:
+            raise RuntimeError(f"GCC does not point to a compiler: {configured}")
+        return found
+    found = shutil.which("gcc")
+    if found is None:
+        raise RuntimeError("gcc not found; set GCC or install gcc")
+    return found
+
+
+def check_error(err, number, category, cause):
+    """Return why err is not the expected one-line statement error, or None."""
+    lines = err.splitlines()
+    if len(lines) != 1:
+        return f"expected one stderr line, got {err!r}"
+    match = ERROR_LINE.fullmatch(lines[0])
+    if match is None:
+        return f"not a statement error line: {lines[0]!r}"
+    if match.group(1) != str(number):
+        return f"statement {match.group(1)!r}, expected {number}: {lines[0]!r}"
+    if match.group(2) != category:
+        return f"category {match.group(2)!r}, expected {category!r}: {lines[0]!r}"
+    if re.search(cause, match.group(3)) is None:
+        return f"cause {match.group(3)!r} does not match {cause!r}"
+    return None
+
+
+def cli_error(err, prefix):
+    """Return why err is not one CLI diagnostic line with prefix, or None."""
+    lines = err.splitlines()
+    if len(lines) != 1 or not lines[0].strip():
+        return f"expected one nonempty stderr line, got {err!r}"
+    if not lines[0].startswith(prefix):
+        return f"expected prefix {prefix!r}, got {lines[0]!r}"
+    if re.search(r"statement \d+:", lines[0]):
+        return f"CLI failure must not use a statement number: {lines[0]!r}"
+    return None
 
 
 def _resolve_exe(build_dir):
@@ -63,7 +96,14 @@ def _resolve_exe(build_dir):
         "-o",
         str(exe),
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=BUILD_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"integration build timeout after {BUILD_TIMEOUT}s"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             "integration build failed:\n" + result.stdout + "\n" + result.stderr
@@ -111,7 +151,14 @@ class SqlIntegrationTests(unittest.TestCase):
             command.append(str(sql_path))
         else:
             command.extend(str(arg) for arg in args)
-        result = subprocess.run(command, cwd=str(cwd), capture_output=True)
+        try:
+            result = subprocess.run(
+                command, cwd=str(cwd), capture_output=True, timeout=RUN_TIMEOUT
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(
+                f"timeout after {RUN_TIMEOUT}s: {' '.join(command)}"
+            ) from exc
         return result.returncode, self._decode(result.stdout), self._decode(result.stderr)
 
     def run_sql(self, sql, cwd=None):
@@ -180,20 +227,14 @@ class SqlIntegrationTests(unittest.TestCase):
         )
         return ids, expected_rows[1:]
 
-    def _assert_failure_after_01(self, name, sql, category, extra=None):
+    def _assert_failure_after_01(self, name, sql, category, cause, extra=None):
         work = self.subdir(name)
         _, rows = self._run_01(work)
 
         rc, out, err = self.run_sql(sql, cwd=work)
         self.assertEqual(rc, 1)
         self.assertEqual(out, "")
-        lines = err.strip().splitlines()
-        self.assertEqual(len(lines), 1, err)
-        match = ERROR_LINE.fullmatch(lines[0])
-        self.assertIsNotNone(match, err)
-        self.assertEqual(match.group(1), "1", err)
-        self.assertEqual(match.group(2), category, err)
-        self.assertTrue(match.group(3).strip(), err)
+        self.assertIsNone(check_error(err, 1, category, cause), err)
         if extra is not None:
             extra(work)
 
@@ -203,7 +244,7 @@ class SqlIntegrationTests(unittest.TestCase):
         self.assertEqual(self.parse_rows(out), rows)
         self.assertEqual(out, self.format_rows(rows) + "SELECT OK rows=3\n")
 
-    def _stop_case(self, name, middle, category):
+    def _stop_case(self, name, middle, category, cause):
         work = self.subdir(name)
         sql = (
             "INSERT INTO users VALUES ('BeforeError', 20);\n"
@@ -216,12 +257,7 @@ class SqlIntegrationTests(unittest.TestCase):
         self.assertEqual(len(ids), 1, out)
         self.assertEqual(out, f"INSERT OK id={ids[0]}\n")
 
-        lines = err.strip().splitlines()
-        self.assertEqual(len(lines), 1, err)
-        match = ERROR_LINE.fullmatch(lines[0])
-        self.assertIsNotNone(match, err)
-        self.assertEqual(match.group(1), "2", err)
-        self.assertEqual(match.group(2), category, err)
+        self.assertIsNone(check_error(err, 2, category, cause), err)
 
         rc, out, err = self.run_sql("SELECT * FROM users;", cwd=work)
         self.assertEqual(rc, 0, err)
@@ -265,7 +301,9 @@ class SqlIntegrationTests(unittest.TestCase):
         self.assertEqual(out, "SELECT OK rows=0\n")
 
     def test_03_syntax_error(self):
-        self._assert_failure_after_01("03", "SELECT FROM users;", "syntax")
+        self._assert_failure_after_01(
+            "03", "SELECT FROM users;", "syntax", r"expected\s+'?\*'?"
+        )
 
     def test_04_unknown_table(self):
         def no_unknown_file(work):
@@ -273,38 +311,49 @@ class SqlIntegrationTests(unittest.TestCase):
             self.assertFalse((work / "unknown_table.sans").exists())
 
         self._assert_failure_after_01(
-            "04", "SELECT * FROM unknown_table;", "schema", no_unknown_file
+            "04", "SELECT * FROM unknown_table;", "schema", r"table", no_unknown_file
         )
 
     def test_05_missing_value_count(self):
         self._assert_failure_after_01(
-            "05", "INSERT INTO users VALUES ('Mina');", "schema"
+            "05",
+            "INSERT INTO users VALUES ('Mina');",
+            "schema",
+            r"value count|values",
         )
 
     def test_06_extra_value_is_schema_not_syntax(self):
         self._assert_failure_after_01(
-            "06", "INSERT INTO users VALUES ('Mina', 20, 99);", "schema"
+            "06",
+            "INSERT INTO users VALUES ('Mina', 20, 99);",
+            "schema",
+            r"value count|values",
         )
 
     def test_07_name_type_error(self):
         self._assert_failure_after_01(
-            "07", "INSERT INTO users VALUES (123, 20);", "type"
+            "07", "INSERT INTO users VALUES (123, 20);", "type", r"type"
         )
 
     def test_08_age_type_error(self):
         self._assert_failure_after_01(
-            "08", "INSERT INTO users VALUES ('Mina', 'twenty');", "type"
+            "08", "INSERT INTO users VALUES ('Mina', 'twenty');", "type", r"type"
         )
 
     def test_09_syntax_stops_before_after_insert(self):
-        self._stop_case("09-syntax", "SELECT FROM users;", "syntax")
+        self._stop_case(
+            "09-syntax", "SELECT FROM users;", "syntax", r"expected\s+'?\*'?"
+        )
 
     def test_09_executor_error_stops_before_after_insert(self):
-        self._stop_case("09-exec", "SELECT * FROM unknown_table;", "schema")
+        self._stop_case("09-exec", "SELECT * FROM unknown_table;", "schema", r"table")
 
     def test_10_unterminated_statement(self):
         self._assert_failure_after_01(
-            "10", "INSERT INTO users VALUES ('Mina', 20", "syntax"
+            "10",
+            "INSERT INTO users VALUES ('Mina', 20",
+            "syntax",
+            r"end of statement|unterminated",
         )
 
     def test_11_where_matches_and_id_lookup(self):
@@ -336,12 +385,12 @@ class SqlIntegrationTests(unittest.TestCase):
 
     def test_12_unknown_where_column(self):
         self._assert_failure_after_01(
-            "12", "SELECT * FROM users WHERE nickname = 'Mina';", "schema"
+            "12", "SELECT * FROM users WHERE nickname = 'Mina';", "schema", r"column"
         )
 
     def test_13_where_id_type(self):
         self._assert_failure_after_01(
-            "13", "SELECT * FROM users WHERE id = '7';", "type"
+            "13", "SELECT * FROM users WHERE id = '7';", "type", r"type"
         )
 
     def test_14_schema_boundaries(self):
@@ -374,12 +423,15 @@ class SqlIntegrationTests(unittest.TestCase):
     def test_15_name_too_long(self):
         name65 = "a" * 65
         self._assert_failure_after_01(
-            "15", f"INSERT INTO users VALUES ('{name65}', 20);", "range"
+            "15",
+            f"INSERT INTO users VALUES ('{name65}', 20);",
+            "range",
+            r"range|too long",
         )
 
     def test_16_age_out_of_range(self):
         self._assert_failure_after_01(
-            "16", "INSERT INTO users VALUES ('Mina', 2147483648);", "range"
+            "16", "INSERT INTO users VALUES ('Mina', 2147483648);", "range", r"range"
         )
 
     def test_17_name_output_escaping(self):
@@ -419,7 +471,7 @@ class SqlIntegrationTests(unittest.TestCase):
         rc, out, err = self.run_exe([], cwd=work)
         self.assertEqual(rc, 1)
         self.assertEqual(out, "")
-        self.assertTrue(err.startswith("usage: "), err)
+        self.assertIsNone(cli_error(err, "usage: "), err)
         self.assertFalse((work / "users.sans").exists())
 
     def test_cli_extra_argument(self):
@@ -429,7 +481,7 @@ class SqlIntegrationTests(unittest.TestCase):
         rc, out, err = self.run_exe([sql_path, "extra"], cwd=work)
         self.assertEqual(rc, 1)
         self.assertEqual(out, "")
-        self.assertTrue(err.startswith("usage: "), err)
+        self.assertIsNone(cli_error(err, "usage: "), err)
         self.assertFalse((work / "users.sans").exists())
 
     def test_cli_missing_sql_file(self):
@@ -437,7 +489,7 @@ class SqlIntegrationTests(unittest.TestCase):
         rc, out, err = self.run_exe([work / "missing.sql"], cwd=work)
         self.assertEqual(rc, 1)
         self.assertEqual(out, "")
-        self.assertTrue(err.startswith("input: "), err)
+        self.assertIsNone(cli_error(err, "input: "), err)
         self.assertFalse((work / "users.sans").exists())
 
     def test_cli_empty_input(self):
@@ -473,7 +525,7 @@ class SqlIntegrationTests(unittest.TestCase):
         rc, out, err = self.run_exe([sql_path], cwd=work)
         self.assertEqual(rc, 1)
         self.assertEqual(out, "")
-        self.assertTrue(err.startswith("input: "), err)
+        self.assertIsNone(cli_error(err, "input: "), err)
         self.assertFalse((work / "users.sans").exists())
 
 

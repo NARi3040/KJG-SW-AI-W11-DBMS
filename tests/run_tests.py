@@ -19,25 +19,39 @@ SOURCES = ("main.c", "parser.c", "execute.c", "storage.c")
 CFLAGS = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(ROOT)]
 RESULTS = []
 GCC = None
+TIMEOUT = 300  # seconds per compile/run; the 128MiB CLI cases need room
+PYTHON_TIMEOUT = 900  # the integration suite builds and runs many cases
 
 
 def resolve_gcc():
-    candidates = [os.environ.get("GCC")]
-    candidates.append(r"C:\ProgramData\mingw64\mingw64\bin\gcc.exe")
-    candidates.append(shutil.which("gcc"))
-    for candidate in candidates:
-        if candidate and pathlib.Path(candidate).is_file():
-            return str(candidate)
-    return None
+    configured = os.environ.get("GCC")
+    if configured:
+        return shutil.which(configured)  # None: missing or invalid explicit GCC
+    return shutil.which("gcc")
 
 
-def run(command, cwd=ROOT):
-    return subprocess.run(
-        [str(part) for part in command],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-    )
+def _text(data):
+    if data is None:
+        return ""
+    return data.decode("utf-8", "replace") if isinstance(data, bytes) else data
+
+
+def run(command, cwd=ROOT, timeout=TIMEOUT):
+    try:
+        return subprocess.run(
+            [str(part) for part in command],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            _text(exc.stdout),
+            f"TIMEOUT after {timeout}s\n{_text(exc.stderr)}",
+        )
 
 
 def record(name, status, detail=None):
@@ -58,7 +72,7 @@ def compile_and_run(name, sources, build_dir, run_cwd=None):
         missing(name, absent)
         return
     if GCC is None:
-        record(name, "MISSING", "gcc not found; set GCC")
+        record(name, "MISSING", "gcc not found; set GCC to a valid compiler")
         return
 
     exe = build_dir / (name + (".exe" if os.name == "nt" else ""))
@@ -92,7 +106,7 @@ def run_python(name, script, required):
         return
     command = [sys.executable, script]
     print("[RUN] " + " ".join(str(part) for part in command))
-    result = run(command)
+    result = run(command, timeout=PYTHON_TIMEOUT)
     if result.returncode != 0:
         record(
             name,
@@ -107,6 +121,11 @@ def main():
     global GCC
     GCC = resolve_gcc()
 
+    run_python(
+        "harness_regression",
+        TESTS / "test_harness.py",
+        [TESTS / "test_harness.py", TESTS / "test_integration.py"],
+    )
     with tempfile.TemporaryDirectory(prefix="dbms_build_") as build_dir:
         build_dir = pathlib.Path(build_dir)
 
@@ -114,7 +133,11 @@ def main():
         if not header.is_file():
             missing("header_contract", [header])
         elif GCC is None:
-            record("header_contract", "MISSING", "gcc not found; set GCC")
+            record(
+                "header_contract",
+                "MISSING",
+                "gcc not found; set GCC to a valid compiler",
+            )
         else:
             command = [GCC, *CFLAGS, "-fsyntax-only", header]
             print("[RUN] " + " ".join(str(part) for part in command))
@@ -130,7 +153,7 @@ def main():
 
         compile_and_run(
             "parser_p01_p02",
-            [ROOT / "parser.c", TESTS / "test_parser.c"],
+            [ROOT / "parser.c", TESTS / "test_parser_contract.c"],
             build_dir,
         )
         compile_and_run(
@@ -147,7 +170,7 @@ def main():
             )
             compile_and_run(
                 "storage_s01_s02",
-                [ROOT / "storage.c", TESTS / "test_storage.c"],
+                [ROOT / "storage.c", TESTS / "test_storage_contract.c"],
                 build_dir,
                 run_cwd=pathlib.Path(storage_cwd),
             )
