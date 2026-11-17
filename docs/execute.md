@@ -62,7 +62,7 @@ DbStatus execute(Storage *storage, const Command *command,
 
 키워드, 테이블명과 조건 열은 대소문자를 구분하지 않아요. 파서는 식별자의 원문을 보존하고, 실행기는 테이블명과 조건 열을 `strcmp` 대신 `strcasecmp`로 비교해요. `users`, `USERS`, `Users`는 같은 테이블이고, `age`와 `Age`는 같은 열이에요.
 
-오류에 식별자를 표시할 때는 `table 'USERS' does not exist`처럼 사용자가 쓴 원문을 그대로 써요. 비교를 위해 명령 안의 이름을 소문자로 덮어쓰지 않아요. 저장 경로는 `users.sans`로 고정이므로 식별자의 대소문자는 파일 이름에 영향을 주지 않아요.
+현재 실행기는 오류 상태 코드만 반환하고, CLI는 식별자 원문을 포함하지 않는 공통 오류 문구를 출력해요. 향후 오류에 식별자를 표시한다면 `table 'USERS' does not exist`처럼 사용자가 쓴 원문을 그대로 써요. 비교를 위해 명령 안의 이름을 소문자로 덮어쓰지 않아요. 저장 경로는 `users.sans`로 고정이므로 식별자의 대소문자는 파일 이름에 영향을 주지 않아요.
 
 문자열은 고정 배열 안에 NUL이 있는지 먼저 확인한 뒤 비교해요. 테스트에서 직접 만든 비정상 명령도 배열 밖으로 읽지 않아요. `user_data`는 콜백이 해석하므로 실행기가 검사하거나 NULL이라는 이유만으로 거절하지 않아요.
 
@@ -72,7 +72,7 @@ DbStatus execute(Storage *storage, const Command *command,
 | --- | --- | --- |
 | 1 | `value_count == 2`인지 확인해요 | 값 배열을 읽지 않고 스키마 오류를 반환해요 |
 | 2 | 첫 값은 `VALUE_STRING`, 둘째 값은 `VALUE_INT`인지 확인해요 | 타입 오류를 반환해요. 자동 변환하지 않아요 |
-| 3 | name의 NUL 종료, 64바이트 이하, 빈 이름 허용을 확인해요 | 스키마 또는 범위 오류를 반환해요 |
+| 3 | name의 NUL 종료, 64바이트 이하, 빈 이름 허용을 확인해요 | NUL 종료 누락은 `DB_ERR_SCHEMA`, 64바이트 초과는 `DB_ERR_RANGE`를 반환해요 |
 | 4 | age가 `int32_t` 범위인지 확인해요 | 범위 오류를 반환해요 |
 | 5 | `storage_insert(storage, name, age, &insert_result)`를 한 번 호출해요 | 저장 오류를 그대로 반환해요 |
 | 6 | 성공한 ID와 레코드 위치를 실행 결과로 복사해요 | 성공일 때만 결과를 유효하게 취급해요 |
