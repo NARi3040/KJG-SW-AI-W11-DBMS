@@ -14,4 +14,13 @@ C로 구현하는 바이너리 파일 기반 DBMS의 팀 설계 문서입니다.
 make test   # 파서 단위 테스트 (gcc 또는 MinGW-w64, C11)
 ```
 
-현재는 **구현 단계**입니다. 공통 헤더 초안은 [`dbms.h`](dbms.h)에 있고, 모듈 구현은 파서(`parser.c`)와 그 테스트만 있습니다. 실행기·저장·CLI는 아직 없습니다.
+공통 인터페이스는 [`dbms.h`](dbms.h)에 있습니다. 파서(`parser.c`)·저장소(`storage.c`)·CLI(`main.c`)가 구현되어 있으며, 실행기(`execute.c`, PR #14)와 전체 테스트 러너(PR #15)는 별도 PR입니다.
+
+PR #13·#14·#15가 모두 반영된 소스 트리에서는 다음 명령으로 빌드하고 전체 테스트를 실행합니다.
+
+```bash
+gcc -std=c11 -Wall -Wextra -Werror -pedantic main.c parser.c execute.c storage.c -o dbms
+python tests/run_tests.py
+```
+
+SQL 파일은 `./dbms input.sql`로 실행합니다(Windows에서는 `.\dbms.exe input.sql`). 전체 테스트의 범위와 의존성은 PR #15의 `tests/README.md`에서 안내합니다. `make test`는 전체 테스트가 아니라 파서 단위 테스트만 실행합니다.
