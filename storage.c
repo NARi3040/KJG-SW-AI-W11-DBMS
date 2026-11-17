@@ -228,10 +228,20 @@ static size_t read_at(FILE *fp, uint64_t offset, void *buf, size_t len) {
     return got;
 }
 
+/* 새 파일·0바이트 파일 초기화용: 64바이트 헤더 전체를 써요. */
 static int write_header(FILE *fp, uint64_t row_count, int64_t next_id) {
     unsigned char header[SANS_HEADER_SIZE];
     encode_header(header, row_count, next_id);
     return write_at(fp, 0, header, sizeof(header));
+}
+
+/* INSERT 5단계용: 16번 위치에 row_count·next_id 16바이트만 써요(5.2절).
+ * 바뀌지 않는 헤더 필드는 건드리지 않아요. */
+static int write_counts(FILE *fp, uint64_t row_count, int64_t next_id) {
+    unsigned char counts[16];
+    put_u64le(counts, row_count);
+    put_u64le(counts + 8, (uint64_t)next_id);
+    return write_at(fp, 16, counts, sizeof(counts));
 }
 
 /* ---------- 공개 함수 ---------- */
@@ -332,7 +342,7 @@ DbStatus storage_insert(Storage *storage, const char *name, int64_t age,
     }
 
     /* 5단계: 실패하면 헤더가 바뀌었는지 알 수 없어요. 다시 시도하지 않아요. */
-    if (!write_header(storage->fp, row_index + 1, id + 1)) {
+    if (!write_counts(storage->fp, row_index + 1, id + 1)) {
         storage->broken = 1;
         return DB_ERR_WRITE_UNCERTAIN;
     }

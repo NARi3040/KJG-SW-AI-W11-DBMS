@@ -277,24 +277,37 @@ static DbStatus insert_and_read(const char *tag, const char *name, int64_t age,
     return status;
 }
 
-static void t06_t09_names(void) {
+/* insert_and_read()가 실패하면 row가 채워지지 않으므로, 결과를 읽기 전에
+ * REQUIRE로 멈춰요. 한 케이스의 실패가 다른 케이스를 건너뛰지 않게 나눠요. */
+static void t06_long_name(void) {
     Row row;
     char name64[65];
     memset(name64, 'a', 64);
     name64[64] = '\0';
-    CHECK(insert_and_read("t06", name64, 1, &row) == DB_OK);
+    REQUIRE(insert_and_read("t06", name64, 1, &row) == DB_OK);
     CHECK(strlen(row.name) == 64);
     CHECK(strcmp(row.name, name64) == 0);
+}
 
-    /* T-8: '김민수' UTF-8 9바이트 */
+static void t08_utf8_name(void) {
+    /* '김민수' UTF-8 9바이트 */
     static const char kim[] = "\xEA\xB9\x80\xEB\xAF\xBC\xEC\x88\x98";
+    Row row;
     CHECK(sizeof(kim) - 1 == 9);
-    CHECK(insert_and_read("t08", kim, 1, &row) == DB_OK);
+    REQUIRE(insert_and_read("t08", kim, 1, &row) == DB_OK);
     CHECK(strcmp(row.name, kim) == 0);
+}
 
-    /* T-9 */
-    CHECK(insert_and_read("t09", "", 1, &row) == DB_OK);
+static void t09_empty_name(void) {
+    Row row;
+    REQUIRE(insert_and_read("t09", "", 1, &row) == DB_OK);
     CHECK(row.name[0] == '\0');
+}
+
+static void t10_age_bound(const char *tag, int32_t age) {
+    Row row;
+    REQUIRE(insert_and_read(tag, "Age", age, &row) == DB_OK);
+    CHECK(row.age == age);
 }
 
 /* 실패한 INSERT가 파일을 바꾸지 않는지 확인해요 (T-7, T-11). */
@@ -319,18 +332,11 @@ static void expect_range_no_change(const char *tag, const char *name, int64_t ag
     remove(path);
 }
 
-static void t07_t10_t11_ranges(void) {
+static void t07_t11_ranges(void) {
     char name65[66];
     memset(name65, 'a', 65);
     name65[65] = '\0';
     expect_range_no_change("t07", name65, 1);
-
-    /* T-10 */
-    Row row;
-    CHECK(insert_and_read("t10a", "Min", INT32_MIN, &row) == DB_OK);
-    CHECK(row.age == INT32_MIN);
-    CHECK(insert_and_read("t10b", "Max", INT32_MAX, &row) == DB_OK);
-    CHECK(row.age == INT32_MAX);
 
     /* T-11, 반대쪽 경계도 함께 */
     expect_range_no_change("t11a", "Over", (int64_t)INT32_MAX + 1);
@@ -576,8 +582,12 @@ int main(int argc, char **argv) {
     t03_exact_bytes();
     t04_scan_three();
     t05_reopen();
-    t06_t09_names();
-    t07_t10_t11_ranges();
+    t06_long_name();
+    t08_utf8_name();
+    t09_empty_name();
+    t10_age_bound("t10a", INT32_MIN);
+    t10_age_bound("t10b", INT32_MAX);
+    t07_t11_ranges();
     t12_callback_error();
     t13_t17_open_checks();
     t18_trailing_garbage();
