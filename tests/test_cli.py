@@ -26,29 +26,42 @@ class CliContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.build = pathlib.Path(cls.tmp.name)
-        cls.exe = cls.build / ("dbms_cli_test.exe" if os.name == "nt" else "dbms_cli_test")
-        result = subprocess.run(
-            [
-                GCC,
-                "-std=c11",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-pedantic",
-                "-I",
-                str(ROOT),
-                str(ROOT / "main.c"),
-                str(ROOT / "tests" / "cli_stubs.c"),
-                "-o",
-                str(cls.exe),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "compile failed:\n" + result.stdout + "\n" + result.stderr
+
+        def compile_cli(name, sources):
+            exe = cls.build / (name + (".exe" if os.name == "nt" else ""))
+            result = subprocess.run(
+                [
+                    GCC,
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-pedantic",
+                    "-I",
+                    str(ROOT),
+                    *[str(source) for source in sources],
+                    "-o",
+                    str(exe),
+                ],
+                capture_output=True,
+                text=True,
             )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"compile failed for {name}:\n"
+                    + result.stdout
+                    + "\n"
+                    + result.stderr
+                )
+            return exe
+
+        cls.exe = compile_cli(
+            "dbms_cli_test", [ROOT / "main.c", ROOT / "tests" / "cli_stubs.c"]
+        )
+        cls.fault_exe = compile_cli(
+            "dbms_cli_faults",
+            [ROOT / "tests" / "cli_faults.c", ROOT / "tests" / "cli_stubs.c"],
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -57,8 +70,8 @@ class CliContractTests(unittest.TestCase):
     def setUp(self):
         self.work = pathlib.Path(tempfile.mkdtemp(dir=self.build))
 
-    def run_cli(self, scenario="empty", sql=b"stub", argv_tail=None,
-                env_extra=None, create_sql=True):
+    def _run(self, exe, scenario="empty", sql=b"stub", argv_tail=None,
+             env_extra=None, create_sql=True):
         sql_path = self.work / "in.sql"
         if create_sql:
             sql_path.write_bytes(sql)
@@ -68,7 +81,21 @@ class CliContractTests(unittest.TestCase):
             env[key] = str(value)
         tail = [str(sql_path)] if argv_tail is None else argv_tail
         return subprocess.run(
-            [str(self.exe), *tail], cwd=self.work, capture_output=True, env=env
+            [str(exe), *tail], cwd=self.work, capture_output=True, env=env
+        )
+
+    def run_cli(self, scenario="empty", sql=b"stub", argv_tail=None,
+                env_extra=None, create_sql=True):
+        return self._run(
+            self.exe, scenario=scenario, sql=sql, argv_tail=argv_tail,
+            env_extra=env_extra, create_sql=create_sql,
+        )
+
+    def run_fault(self, scenario="empty", sql=b"stub", argv_tail=None,
+                  env_extra=None, create_sql=True):
+        return self._run(
+            self.fault_exe, scenario=scenario, sql=sql, argv_tail=argv_tail,
+            env_extra=env_extra, create_sql=create_sql,
         )
 
     @staticmethod
@@ -100,6 +127,70 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertEqual(self.out(proc), "")
         self.assertTrue(self.err(proc).startswith("input: "))
+
+    def test_read_failure_then_close_failure_keeps_both_errors(self):
+        sql_path = self.work / "in.sql"
+        close_marker = self.work / "close-count"
+        open_marker = self.work / "opened"
+        proc = self.run_fault(
+            scenario="empty",
+            sql=b"stub",
+            env_extra={
+                "CLI_FAULT_CLOSE_MARKER": close_marker,
+                "CLI_STUB_OPEN_MARKER": open_marker,
+            },
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(self.out(proc), "")
+        self.assertEqual(
+            self.err(proc),
+            f"input: {sql_path}: cannot read\n"
+            f"input: {sql_path}: cannot close\n",
+        )
+        self.assertEqual(close_marker.read_text().strip(), "1")
+        self.assertFalse(open_marker.exists())
+
+    def test_signal_ignore_runs_before_usage(self):
+        marker = self.work / "signal"
+        proc = self.run_fault(
+            argv_tail=[],
+            env_extra={
+                "CLI_FAULT_SIGNAL_MARKER": marker,
+                "CLI_FAULT_SIGNAL_STDERR": "1",
+            },
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(self.out(proc), "")
+        self.assertTrue(self.err(proc).startswith("signal\nusage: "))
+        self.assertEqual(marker.read_text().strip(), "1")
+
+    def test_signal_failure_stops_before_usage(self):
+        marker = self.work / "signal"
+        proc = self.run_fault(
+            argv_tail=[],
+            env_extra={
+                "CLI_FAULT_SIGNAL_MARKER": marker,
+                "CLI_FAULT_SIGNAL_FAIL": "1",
+                "CLI_FAULT_SIGNAL_STDERR": "1",
+            },
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(self.out(proc), "")
+        self.assertEqual(self.err(proc), "signal\nstart: cannot ignore SIGPIPE\n")
+        self.assertEqual(marker.read_text().strip(), "1")
+
+    @unittest.skipIf(os.name == "nt", "SIGPIPE is POSIX-only")
+    def test_usage_with_closed_stderr_does_not_die_from_sigpipe(self):
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        with os.fdopen(write_fd, "wb") as closed_stderr:
+            proc = subprocess.run(
+                [str(self.exe)],
+                cwd=self.work,
+                stdout=subprocess.PIPE,
+                stderr=closed_stderr,
+            )
+        self.assertEqual(proc.returncode, 1)
 
     def test_empty_input_opens_and_closes_once(self):
         marker = self.work / "closed"

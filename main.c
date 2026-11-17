@@ -87,7 +87,9 @@ static char *read_sql_file(const char *path, size_t *out_length) {
     return sql;
 
 fail:
-    fclose(file);
+    if (fclose(file) != 0) {
+        fprintf(stderr, "input: %s: cannot close\n", path);
+    }
     free(sql);
     return NULL;
 }
@@ -133,17 +135,17 @@ int main(int argc, char *argv[]) {
     char error[PARSE_ERROR_SIZE];
     ExecuteResult result;
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s SQL_FILE\n", argv[0]);
-        return 1;
-    }
-
 #ifdef SIGPIPE
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
         fprintf(stderr, "start: cannot ignore SIGPIPE\n");
         return 1;
     }
 #endif
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s SQL_FILE\n", argv[0]);
+        return 1;
+    }
 
     sql = read_sql_file(argv[1], &length);
     if (sql == NULL) {
