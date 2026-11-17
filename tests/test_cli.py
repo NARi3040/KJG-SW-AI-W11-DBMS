@@ -14,11 +14,20 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-GCC = os.environ.get("GCC", r"C:\ProgramData\mingw64\mingw64\bin\gcc.exe")
-if not pathlib.Path(GCC).exists():
-    GCC = shutil.which("gcc") or GCC
-
 SIZE_128_MIB = 134217728
+
+
+def _gcc():
+    configured = os.environ.get("GCC")
+    if configured:
+        found = shutil.which(configured)
+        if found is None:
+            raise RuntimeError(f"GCC does not point to a compiler: {configured}")
+        return found
+    found = shutil.which("gcc")
+    if found is None:
+        raise RuntimeError("gcc not found; set GCC or install gcc")
+    return found
 
 
 class CliContractTests(unittest.TestCase):
@@ -26,12 +35,13 @@ class CliContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.build = pathlib.Path(cls.tmp.name)
+        gcc = _gcc()
 
         def compile_cli(name, sources):
             exe = cls.build / (name + (".exe" if os.name == "nt" else ""))
             result = subprocess.run(
                 [
-                    GCC,
+                    gcc,
                     "-std=c11",
                     "-Wall",
                     "-Wextra",
