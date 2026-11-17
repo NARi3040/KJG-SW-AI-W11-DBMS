@@ -381,7 +381,12 @@ DbStatus storage_fetch(Storage *storage, uint64_t row_index,
 
 ## 9. 테스트
 
-`tests/storage_test.c`에서 저장 함수를 직접 불러 확인해요. `storage.c`만 링크하고, 파일은 테스트마다 임시 경로에 새로 만들어요. 콜백은 받은 행을 배열에 복사해 두는 테스트용 함수를 써요.
+`tests/storage_test.c`에서 저장 함수를 직접 불러 확인해요. T-23이 `static` 바이트 변환 함수를 직접 부르므로, 테스트 파일이 `storage.c`를 포함해 함께 컴파일해요(`storage.c`를 따로 링크하지 않아요). 파일은 테스트마다 임시 경로에 새로 만들고 끝나면 지워요. 콜백은 받은 행을 배열에 복사해 두는 테스트용 함수를 써요.
+
+```sh
+gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I. -o storage_test tests/storage_test.c
+./storage_test [임시 파일 디렉터리]   # 생략하면 현재 디렉터리
+```
 
 | 번호 | 준비와 호출 | 기대 결과 |
 | --- | --- | --- |
@@ -395,7 +400,7 @@ DbStatus storage_fetch(Storage *storage, uint64_t row_index,
 | T-8 | 이름 `'김민수'` (9바이트) | 다시 읽은 바이트가 같음 |
 | T-9 | 이름 `''` | `DB_OK`, 다시 읽으면 빈 문자열 |
 | T-10 | `age = INT32_MIN`, `INT32_MAX` | 둘 다 `DB_OK`, 값 그대로 |
-| T-11 | `age = INT32_MAX + 1` | `DB_ERR_RANGE`, 파일 변화 없음 |
+| T-11 | `age = INT32_MAX + 1`, `INT32_MIN - 1` | 둘 다 `DB_ERR_RANGE`, 파일 변화 없음 |
 | T-12 | 5건 저장, 콜백이 3번째 행에서 오류 반환 | 그 오류 그대로, `count = 2` |
 | T-13 | 0바이트 파일로 열기 | `DB_OK`, 파일 크기 64 |
 | T-14 | 10바이트 파일로 열기 | `DB_ERR_CORRUPT`, `out_storage = NULL` |
@@ -411,10 +416,13 @@ DbStatus storage_fetch(Storage *storage, uint64_t row_index,
 | T-24 | 1건 저장 후 `storage_scan()` | `DB_OK`, `count = 1`, 그 행 `id = 1`, `row_index = 0` (128개보다 작은 묶음 하나) |
 | T-25 | 128건 저장 후 `storage_scan()` | `DB_OK`, `count = 128`, 마지막 행 `id = 128` (꽉 찬 묶음 하나) |
 | T-26 | 129건 저장 후 `storage_scan()` | `DB_OK`, `count = 129`, 마지막 행 `id = 129`, `row_index = 128` (128개 + 1개 두 묶음) |
+| T-27 | 129건 저장 후, 콜백이 행마다 같은 `Storage`에 INSERT하며 scan (계약 위반) | scan은 `DB_OK`, `count = 129`, 마지막 행 `id = 129`. 다시 열어 scan하면 258건 (5.3절: 묶음마다 위치를 다시 잡음) |
+| T-28 | 3건 저장 후 2번째 레코드의 이름 뒤 패딩, 1번째 레코드의 예약 바이트를 각각 0이 아닌 값으로 바꿈 | 각각 scan이 `DB_ERR_CORRUPT`, `count = 1`과 `count = 0` |
+| T-29 | 3건 저장 후 3번째 레코드의 이름 안 한 바이트를 0으로 바꿈 | scan이 `DB_ERR_CORRUPT`, `count = 2` |
 
 - 헤더 쓰기 실패(`DB_ERR_WRITE_UNCERTAIN`)는 일반 파일로 일부러 만들기 어려워요. 단위 테스트에서는 다루지 않고 코드 리뷰로 확인해요(10장). [테스트 설계](test.md#1-범위와-준비)도 실패 주입을 이번 범위에서 뺐어요.
 - [테스트 설계 3장](test.md#3-최소-단위-테스트)의 S01은 T-2·T-4, S02는 T-5와 같은 내용이에요. 이 표가 기대값을 더 자세히 적은 것이라, 구현할 때는 한 파일에 합쳐요.
-- SQL 파일 테스트(01~13)는 최무헌 님 담당이에요. 그쪽에서 이 표의 동작에 기대는 곳은 02.sql(재시작 후 데이터와 ID 보존)이에요.
+- SQL 파일 테스트(01~18)는 최무헌 님 담당이에요. 그쪽에서 이 표의 동작에 기대는 곳은 02.sql(재시작 후 데이터와 ID 보존)과 14~16.sql(이름 64·65바이트, age `int32` 경계)이에요. 14~16.sql은 실행기가 먼저 거르지만, 저장 모듈도 같은 기준으로 다시 검사해요(T-6·T-7·T-10·T-11).
 - T-3의 "최초 ID 1"은 저장 모듈 단위 테스트에서만 확인해요. SQL 파일 테스트는 최초 ID를 1로 가정하지 않아요(test.md 1장).
 
 ## 10. 정하지 않은 것
