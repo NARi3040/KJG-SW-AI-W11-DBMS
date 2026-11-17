@@ -148,6 +148,7 @@ for (;;) {
 
 - 키워드와 같은 이름은 식별자로 쓸 수 없어요. 예: `SELECT * FROM select`는 문법 오류예요.
 - 정수는 `strtoll`로 읽고 `errno == ERANGE`이면 오류예요. `atoi`는 범위를 넘어도 오류 없이 틀린 값을 돌려줘요.
+- 정수 토큰은 `length` 안에서만 읽고, `strtoll`에는 해당 토큰을 NUL 종료한 문자열로 전달해요. NUL 종료가 보장되지 않은 SQL 버퍼의 포인터를 그대로 넘기지 않아요.
 - `int64_t`보다 좁은 범위(예: `age`는 int32)는 실행기가 검사해요. 파서는 열의 자료형을 모르기 때문이에요.
 - `-` 뒤에 숫자가 바로 오지 않으면 오류예요. `- 5`, `--`는 정수가 아니에요.
 - `12abc`처럼 숫자 바로 뒤에 영문자가 붙으면 오류예요.
@@ -262,6 +263,8 @@ static void skip_to_statement_end(Parser *p); // 오류 뒤 커서를 다음 문
 | T-8 | `SELECT * FORM users; SELECT * FROM users;` | SYNTAX, `error = "near 'FORM': expected FROM"`, `cursor = 20`. 다시 부르면 OK |
 | T-9 | `INSERT INTO users VALUES ('abc` | SYNTAX, `error = "unterminated string"`, `cursor = 30` |
 | T-10 | `INSERT INTO users VALUES (99999999999999999999);` | SYNTAX, `error = "integer out of range: 99999999999999999999"` |
+| T-10a | NUL 없이 정확히 32바이트인 `SELECT * FROM users WHERE id = 7` 버퍼, `length = 32` | OK, `where_value.i = 7`, `cursor = length`. 경계 밖을 읽지 않음 |
+| T-10b | NUL 없이 33바이트인 `SELECT * FROM users WHERE id = 78` 버퍼, `length = 32` (마지막 `8`은 범위 밖) | OK, `where_value.i = 7`, `cursor = length`. 범위 밖 숫자를 변환에 포함하지 않음 |
 | T-11 | 따옴표 안에 `a` 256개 | SYNTAX, `error = "string too long (max 255 bytes)"` |
 | T-12 | 따옴표 안에 `a` 255개 | OK, `strlen(values[0].s) = 255` |
 | T-13 | 식별자 `a` 32개를 테이블 이름으로 | SYNTAX, `error = "identifier too long (max 31 bytes)"` |
