@@ -100,16 +100,23 @@ flowchart TD
 | `ExecuteResult` | INSERT 저장 결과 또는 SELECT에서 성공 처리한 행 수 |
 | `RowHandler` | 한 행과 호출자 상태를 받고 `DbStatus`를 반환하는 함수 포인터 타입 |
 
-파서 쪽 `Command`와 값 타입은 [파서 세부 설계 3.1절](parser.md#31-dbmsh에-들어갈-파서-쪽-정의)을 공통 헤더의 기준으로 사용한다. `Row`와 `InsertResult`는 저장 설계 제안을 수용해 확정했다. `ExecuteResult`의 필드명과 나머지 오류 상수·enum 수치 값은 세 명이 함께 맞춘다. 각 `.c`에서 같은 타입을 서로 다르게 정의하지 않는다. `RowHandler`는 타입명이지 구현할 함수가 아니다.
+파서 쪽 `Command`와 값 타입은 [파서 세부 설계 3.1절](parser.md#31-dbmsh에-들어갈-파서-쪽-정의)을 공통 헤더의 기준으로 사용한다. `Row`와 `InsertResult`는 저장 설계 제안을 수용해 확정했다. 실제 정의는 [`dbms.h`](../dbms.h)에 두며, 아래의 미정 항목 구현 초안은 이슈 #4에서 함께 검토한다. 각 `.c`에서 같은 타입을 서로 다르게 정의하지 않는다. `RowHandler`는 타입명이지 구현할 함수가 아니다.
+
+#### 이슈 #4의 공통 헤더 초안
+
+- `ExecuteResult`는 `InsertResult insert`와 `size_t row_count`를 가진다. `insert`는 INSERT 성공 시에만 유효하다. SELECT의 `row_count`는 외부 콜백이 성공한 행 수이며, 중간 실패 시에도 부분 행 수로 유효하다.
+- `DbStatus`는 `DB_OK=0`, `DB_END=1`, `DB_ERR_SYNTAX=2`, `DB_ERR_ARG=3`, `DB_ERR_SCHEMA=4`, `DB_ERR_TYPE=5`, `DB_ERR_RANGE=6`, `DB_ERR_NOMEM=7`, `DB_ERR_IO=8`, `DB_ERR_CORRUPT=9`, `DB_ERR_OUTPUT=10`, `DB_ERR_WRITE_UNCERTAIN=11`로 제안한다. 호출자는 수치의 대소나 참·거짓이 아니라 상수와 비교한다.
+- 인자 오류와 지원하지 않는 명령 종류는 `DB_ERR_ARG`, 스키마 오류는 `DB_ERR_SCHEMA`, 자료형 불일치는 `DB_ERR_TYPE`, 출력 실패는 `DB_ERR_OUTPUT`으로 구분한다. `DB_END`는 파서의 정상 입력 끝에만 쓴다.
+- 이 필드 구성과 상태 값은 컴파일 가능한 구현 초안이지 팀 합의 완료를 뜻하지 않는다. 변경 시 헤더와 계약 테스트를 함께 수정한다.
 
 현재 저장 API 기준으로 users의 INSERT 값은 `name`(문자열), `age`(정수) 순서이며 `id`는 저장 모듈이 자동 발급한다. SQL 예시는 [파서 세부 설계의 결과 예](parser.md#결과-예)를 참고한다. **P-1~P-3을 수용했다.** 고정 크기 명령과 오류 버퍼, SELECT의 `WHERE 열 = 값` 조건 하나를 사용한다. 식별자는 31바이트, 문자열 값은 255바이트, INSERT 값은 최대 16개이며 오류 버퍼는 끝의 NUL을 포함해 128바이트다. 스키마의 실제 INSERT 값 개수는 2개로 검증한다. 저장 스키마에서 `name`은 끝의 NUL을 제외해 최대 64바이트이고 빈 문자열을 허용하며, `age`는 `int32_t` 범위, 자동 `id`는 1 이상 `int64_t` 범위다.
 
 ### 4.2 공개 함수 선언 초안
 
-> 아래는 **인터페이스 초안**이다. 공통 타입의 실제 C 정의가 없으므로 그대로 복사해 컴파일하는 완성 헤더가 아니다.
+> 아래는 공개 선언을 발췌한 것이다. 컴파일 시에는 공통 타입까지 정의한 [`dbms.h`](../dbms.h)를 포함한다.
 
 ```c
-// dbms.h: 공통 타입 정의가 먼저 필요하다.
+// dbms.h의 공통 타입 정의 뒤에 오는 공개 선언.
 // size_t: <stddef.h>, int64_t: <stdint.h>
 typedef DbStatus (*RowHandler)(const Row *row, void *user_data);
 
@@ -232,7 +239,7 @@ WHERE 조건은 `id`, `name`, `age` 중 한 열과 같은 자료형의 값에 �
 
 | 항목 | 합의할 내용 | 관련 담당 |
 | --- | --- | --- |
-| 공통 C 타입 | `ExecuteResult`의 필드명, 나머지 오류 상수와 enum의 수치 값 정의 | 전원 |
+| 공통 C 타입 | 이슈 #4의 `dbms.h` 초안에 제시한 `ExecuteResult` 필드와 상태 값 검토 | 전원 |
 | 저장 파일 정책 | 파일 생성, 기존 파일 형식 검사, 다음 ID 복원, 손상 처리 | 저장·실행기 |
 | 바이너리 레이아웃 | 헤더·레코드 형식, 문자열 표현, 정수 인코딩 | 저장 |
 
