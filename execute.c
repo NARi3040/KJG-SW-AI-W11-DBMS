@@ -1,8 +1,9 @@
 /*
  * execute.c - 명령 검증과 INSERT/SELECT 실행
  *
- * 저장 함수를 호출하기 전에 명령을 모두 검증해요. SELECT WHERE는 저장소를
- * 한 번 스캔하면서 실행기 내부 필터로 일치 행만 외부 콜백에 전달해요.
+ * 저장 함수를 호출하기 전에 명령을 모두 검증해요. SELECT WHERE id는 저장
+ * 모듈의 인덱스 조회(storage_find_by_id)로 찾고, name·age는 저장소를 한 번
+ * 스캔하면서 실행기 내부 필터로 일치 행만 외부 콜백에 전달해요.
  */
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE 1 /* POSIX strcasecmp under strict -std=c11 */
@@ -174,6 +175,15 @@ static DbStatus scan_where(Storage *storage, const Command *command,
     if (status != DB_OK) {
         return status;
     }
+    if (filter.column == WHERE_ID) {
+        /* validate_where가 id >= 1을 확인했어요. 콜백 계약이 scan과 같아
+         * 외부 콜백을 그대로 넘기고, 성공 횟수가 곧 row_count예요. */
+        status = storage_find_by_id(storage, command->where_value.i, on_row,
+                                    user_data, &scan_count);
+        out_result->row_count = scan_count;
+        return status;
+    }
+
     filter.command = command;
     filter.on_row = on_row;
     filter.user_data = user_data;
