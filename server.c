@@ -922,7 +922,11 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (!queue_push(&queue, client) && !queue_push(&reject_queue, client)) {
-            /* shortcut: 503 대기열까지 차면 응답 없이 닫음, 부하 측정에서 자주 보이면 REJECT_MAX를 늘림. */
+            /* 503 대기열까지 차면 여기서 바로 보내요. 새 연결의 송신 버퍼는 비어 있어
+             * 짧은 응답은 accept를 막지 않아요. 요청을 읽지 않고 닫으므로 클라이언트가
+             * 이미 요청을 보냈다면 503 대신 연결 리셋을 볼 수 있어요. */
+            send_request_error(client, 503, "server busy");
+            shutdown(client, SOCKET_SHUT_WRITE);
             socket_close(client);
         }
     }

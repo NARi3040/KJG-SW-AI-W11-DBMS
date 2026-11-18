@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
@@ -51,7 +52,13 @@ class ServerProcess:
             stderr=subprocess.PIPE,
             text=True,
         )
-        line = self.proc.stdout.readline()
+        # readline() blocks, so read on a thread and give up after START_TIMEOUT.
+        lines = []
+        reader = threading.Thread(target=lambda: lines.append(self.proc.stdout.readline()),
+                                  daemon=True)
+        reader.start()
+        reader.join(START_TIMEOUT)
+        line = lines[0] if lines else ""
         if "listening on" not in line:
             self.stop()
             raise RuntimeError(f"server did not start: {line!r} {self.proc.stderr.read()!r}")
@@ -219,7 +226,12 @@ class ServerTest(unittest.TestCase):
         with socket.create_connection(("127.0.0.1", self.server.port), timeout=10) as sock:
             sock.sendall(b"POST /query HTTP/1.1\r\nContent-Length: %d\r\n"
                          b"Expect: 100-continue\r\n\r\n" % len(body))
-            self.assertEqual(sock.recv(25), b"HTTP/1.1 100 Continue\r\n\r\n")
+            interim = b""
+            while not interim.endswith(b"\r\n\r\n"):
+                chunk = sock.recv(64)
+                self.assertTrue(chunk, f"EOF before end of 100 Continue: {interim!r}")
+                interim += chunk
+            self.assertEqual(interim, b"HTTP/1.1 100 Continue\r\n\r\n")
             sock.sendall(body)
             reply = b""
             while True:
@@ -314,6 +326,36 @@ class ServerTest(unittest.TestCase):
             for _ in range(5):
                 self.assertEqual(small.raw(
                     b"POST /query HTTP/1.1\r\nContent-Length: 1\r\n\r\n;"), (503, busy))
+        finally:
+            for sock in held:
+                sock.close()
+            small.stop()
+
+    def test_both_queues_full_still_gets_503(self):
+        busy = {"ok": False, "results": [],
+                "error": {"category": "request", "message": "server busy"}}
+        small = ServerProcess(self.exe, self.data_dir.name, "--threads", "1", "--queue", "1")
+        held = []
+        try:
+            for _ in range(2):  # one blocks the only worker, one fills the queue
+                sock = socket.create_connection(("127.0.0.1", small.port), timeout=10)
+                sock.sendall(b"POST /query HTTP/1.1\r\n")
+                held.append(sock)
+                time.sleep(0.3)
+            # Idle clients: the reject thread waits up to ~1 s on the first one, so the
+            # next 64 fill the reject queue (REJECT_MAX) and the probe below overflows it.
+            for _ in range(1 + 64):
+                held.append(socket.create_connection(("127.0.0.1", small.port), timeout=10))
+            with socket.create_connection(("127.0.0.1", small.port), timeout=10) as probe:
+                reply = b""
+                while True:
+                    chunk = probe.recv(4096)
+                    if not chunk:
+                        break
+                    reply += chunk
+            head, _, body = reply.partition(b"\r\n\r\n")
+            self.assertTrue(head.startswith(b"HTTP/1.1 503 "), reply)
+            self.assertEqual(json.loads(body), busy)
         finally:
             for sock in held:
                 sock.close()
