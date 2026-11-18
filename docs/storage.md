@@ -360,6 +360,8 @@ static size_t   read_at(FILE *fp, uint64_t offset, void *buf, size_t len);
 
 파서 P-3의 질문("id로 한 행 읽기를 둘지")에 대한 저장 쪽 의견이에요. 시그니처는 Phase 2에서 확정해요.
 
+> **#17 결과:** 위치로 읽기는 공개하지 않고 저장 모듈 내부 함수로 써요. 새 공개 함수는 `storage_find_by_id()`이고, 인덱스 갱신은 저장 모듈이 맡아요([Phase 2·3 계획 3.1절](phase2-3.md#31-인덱스-소유-안건-3-a)).
+
 ```c
 // 저장 쪽 제안, 합의 전
 DbStatus storage_fetch(Storage *storage, uint64_t row_index,
