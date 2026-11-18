@@ -85,7 +85,9 @@ static pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
 static Storage *server_storage;
 static Queue queue;
 static Queue reject_queue; /* 대기열이 가득 찼을 때 503을 보낼 연결 */
-static char allowed_hosts[2][32]; /* "127.0.0.1:<포트>", "localhost:<포트>" */
+/* "127.0.0.1:<포트>", "localhost:<포트>". 포트 80이면 클라이언트가 포트를 빼므로 이름만도 받아요. */
+static char allowed_hosts[4][32];
+static size_t allowed_host_count;
 
 /* ---------- CLI와 같은 오류 문구 (main.c에서 복사) ---------- */
 
@@ -585,12 +587,14 @@ static RequestStatus read_request(Socket socket, char **out_body, size_t *out_le
             /* DNS 리바인딩으로 들어온 요청은 Host가 다른 이름이에요. */
             const char *value = colon + 1;
             const char *value_end = line_end;
-            size_t length;
+            size_t i;
+            int allowed = 0;
 
             trim_value(&value, &value_end);
-            length = (size_t)(value_end - value);
-            if (!ascii_equals(value, length, allowed_hosts[0]) &&
-                !ascii_equals(value, length, allowed_hosts[1])) {
+            for (i = 0; i < allowed_host_count; i++) {
+                allowed |= ascii_equals(value, (size_t)(value_end - value), allowed_hosts[i]);
+            }
+            if (!allowed) {
                 forbidden = 1;
             }
         }
@@ -871,6 +875,12 @@ int main(int argc, char *argv[]) {
 
     snprintf(allowed_hosts[0], sizeof allowed_hosts[0], "127.0.0.1:%ld", port);
     snprintf(allowed_hosts[1], sizeof allowed_hosts[1], "localhost:%ld", port);
+    allowed_host_count = 2;
+    if (port == 80) {
+        strcpy(allowed_hosts[2], "127.0.0.1");
+        strcpy(allowed_hosts[3], "localhost");
+        allowed_host_count = 4;
+    }
     listener = open_listener(port);
     if (listener == SOCKET_NONE) {
         fprintf(stderr, "start: cannot listen on 127.0.0.1:%ld\n", port);

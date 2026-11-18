@@ -186,7 +186,8 @@ class ServerTest(unittest.TestCase):
         for headers in (b"Origin: http://evil.example\r\n",
                         b"Origin: null\r\n",
                         b"Host: evil.example:%d\r\n" % port,
-                        b"Host: 127.0.0.1:%d\r\n" % (port + 1)):
+                        b"Host: 127.0.0.1:%d\r\n" % (port + 1),
+                        b"Origin: http://evil.example\r\nHost: 127.0.0.1:%d\r\n" % port):
             with self.subTest(headers=headers):
                 request = (b"POST /query HTTP/1.1\r\n" + headers +
                            b"Content-Length: %d\r\n\r\n" % len(body) + body)
