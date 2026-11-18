@@ -54,6 +54,7 @@ import time
 
 START_TIMEOUT = 30
 REQUEST_TIMEOUT = 120
+RESULT_SLACK = REQUEST_TIMEOUT + 60  # extra wait for client results past a run's end
 
 # A request that fails in any of these ways is counted as an error by name,
 # never allowed to end the run with a traceback (that would lose the table,
@@ -131,8 +132,11 @@ class Server:
             return ""
 
     def tsan_reports(self, failures, label):
-        """Count of TSan warnings so far. If the log cannot be read the run is a
-        failure (not "0 warnings") and -1 is returned."""
+        """Count of TSan warnings. Stops the server first, so every warning it
+        could write is in the log before it is read (kill() waits for the
+        process). If the log cannot be read the run is a failure, not
+        "0 warnings", and -1 is returned."""
+        self.kill()
         try:
             text = self.stderr_text()
         except OSError as exc:
@@ -146,12 +150,18 @@ class Server:
 
 
 def parse_response(raw):
-    """(status, JSON or None) from a raw HTTP response; ConnectionError if no
-    status line arrived (server closed without answering)."""
+    """(status, JSON or None) from a raw HTTP response. ConnectionError if no
+    status line arrived (server closed without answering) or the body is not
+    exactly Content-Length bytes (a cut-off response, even if it parses)."""
     head, _, body = raw.partition(b"\r\n\r\n")
-    parts = head.split(b" ", 2)
+    lines = head.split(b"\r\n")
+    parts = lines[0].split(b" ", 2)
     if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or not parts[1].isdigit():
         raise ConnectionError(f"no HTTP status line: {head[:40]!r}")
+    lengths = [line.split(b":", 1)[1].strip() for line in lines[1:]
+               if line.lower().startswith(b"content-length:")]
+    if len(lengths) != 1 or not lengths[0].isdigit() or int(lengths[0]) != len(body):
+        raise ConnectionError(f"body is {len(body)} bytes, Content-Length {lengths!r}")
     try:
         return int(parts[1]), json.loads(body)
     except ValueError:
@@ -227,8 +237,14 @@ def check_select(body, want_id):
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         return False
     row = rows[0]
-    return (row.get("id") == want_id and row.get("name") == f"user{want_id}"
-            and row.get("age") == want_id % 100)
+    return (is_int(row.get("id")) and row["id"] == want_id
+            and row.get("name") == f"user{want_id}"
+            and is_int(row.get("age")) and row["age"] == want_id % 100)
+
+
+def is_int(value):
+    """A JSON integer: not a bool (True == 1) and not a float (1.0 == 1)."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def insert_id(body):
@@ -237,7 +253,7 @@ def insert_id(body):
     if result is None or result.get("type") != "insert":
         return None
     rid = result.get("id")
-    return rid if isinstance(rid, int) and not isinstance(rid, bool) else None
+    return rid if is_int(rid) else None
 
 
 # ---------- client processes ----------
@@ -312,11 +328,26 @@ def aggregate(results, duration):
             "first": min(firsts) if firsts else None, "last": max(lasts) if lasts else None}
 
 
+class PoolStuck(RuntimeError):
+    """A client process did not return in time (e.g. it died: Pool never
+    gives back the result of a task whose worker died)."""
+
+
+def wait_results(async_result, timeout, what):
+    try:
+        return async_result.get(timeout=timeout)
+    except multiprocessing.TimeoutError:
+        raise PoolStuck(f"{what}: no result within {timeout:.0f}s "
+                        "(a client process may have died)") from None
+
+
 def run_clients(pool, port, kind, rows, clients, duration, insert_ratio=0.2, seed0=1,
                 pause=0.1):
     start_at = time.monotonic() + 1.0
     jobs = make_jobs(port, kind, rows, clients, start_at, duration, insert_ratio, seed0, pause)
-    return aggregate(pool.map(client_loop, jobs), duration)
+    # A run ends at start_at + duration, plus at most one request in flight.
+    results = wait_results(pool.map_async(client_loop, jobs), duration + 1 + RESULT_SLACK, kind)
+    return aggregate(results, duration)
 
 
 def pct(sorted_values, p):
@@ -391,22 +422,31 @@ def suite_blocking(opt, pool, failures):
     threads = max(opt.threads)
     D = opt.duration
     server = Server(opt.server, threads, data=opt.data)
-    bg_pool = multiprocessing.Pool(opt.name_clients)
+    bg_pool = None
+    name_done = False
     try:
         server.start()
         alone = run_clients(pool, server.port, "id", rows, 1, D, seed0=101)
 
+        # Created inside try, so the server copy is removed even if this fails.
+        bg_pool = multiprocessing.Pool(opt.name_clients)
         t0 = time.monotonic() + 1.5
         name_async = bg_pool.map_async(client_loop, make_jobs(
             server.port, "name", rows, opt.name_clients, t0, D + 2, 0.0, 201, opt.pause))
-        busy = aggregate(pool.map(client_loop, make_jobs(
-            server.port, "id", rows, 1, t0 + 1, D, 0.0, 301, opt.pause)), D)
+        busy = aggregate(wait_results(pool.map_async(client_loop, make_jobs(
+            server.port, "id", rows, 1, t0 + 1, D, 0.0, 301, opt.pause)),
+            D + 3 + RESULT_SLACK, "blocking id"), D)
         # get() re-raises an exception from the name clients instead of losing it
-        name = aggregate(name_async.get(timeout=D + 2 + REQUEST_TIMEOUT + 30), D + 2)
+        name = aggregate(wait_results(name_async, D + 4 + RESULT_SLACK, "blocking name"), D + 2)
+        name_done = True
         tsan = server.tsan_reports(failures, "blocking")
     finally:
-        bg_pool.close()
-        bg_pool.join()
+        if bg_pool is not None:
+            if name_done:
+                bg_pool.close()
+            else:
+                bg_pool.terminate()  # close() would wait for unfinished name jobs
+            bg_pool.join()
         server.cleanup()
 
     overlapped = (name["first"] is not None and busy["first"] is not None
@@ -438,7 +478,9 @@ def suite_correctness(opt, pool, failures):
         server.start()
         start_at = time.monotonic() + 1.0
         jobs = [(server.port, c, per[c], start_at) for c in range(clients)]
-        results = pool.map(insert_worker, jobs)
+        # Generous: a local INSERT takes about a millisecond.
+        results = wait_results(pool.map_async(insert_worker, jobs),
+                               1 + max(per) * 0.5 + RESULT_SLACK, "correctness")
         sent = {}
         problems = []
         duplicates = 0
@@ -463,8 +505,14 @@ def suite_correctness(opt, pool, failures):
         server.cleanup()
 
     def same(rows):
-        return (rows is not None and len(rows) == total and {r.get("id") for r in rows} == set(sent)
-                and all(sent.get(r.get("id")) == (r.get("name"), r.get("age")) for r in rows))
+        # Check types before building a set, so a bad row is a failed check,
+        # not a TypeError that loses the table.
+        if rows is None or len(rows) != total:
+            return False
+        if not all(is_int(r.get("id")) and is_int(r.get("age")) for r in rows):
+            return False
+        return ({r["id"] for r in rows} == set(sent)
+                and all(sent.get(r["id"]) == (r.get("name"), r["age"]) for r in rows))
 
     checks = [
         ("INSERT 응답 수 = 보낸 수", len(sent) == total and not problems, f"{len(sent):,} / {total:,}"),
@@ -552,8 +600,11 @@ def main():
             ap.error(f"--{name.replace('_', '-')} must be a finite number > 0")
     if not math.isfinite(opt.pause) or opt.pause < 0:
         ap.error("--pause must be a finite number >= 0")
-    if "correctness" in suites and opt.inserts < 1:
-        ap.error("--inserts must be at least 1")
+    if "correctness" in suites and (opt.clients < 2 or opt.inserts < 2):
+        # With one client (or one INSERT) the INSERTs run one after another,
+        # so passing would not show anything about concurrent INSERTs.
+        ap.error("correctness needs --clients >= 2 and --inserts >= 2 "
+                 "(at least two clients sending INSERTs at once)")
     if any(s in suites for s in ("throughput", "blocking")) and not opt.data:
         ap.error("--data is required for throughput and blocking")
 
@@ -582,11 +633,18 @@ def main():
           f"{sys.version.split()[0]}, 클라이언트 프로세스 {opt.clients}개")
     failures = []
     try:
+        # Leaving the with-block terminates the pool, so a stuck client process
+        # cannot keep the script waiting. Each suite cleans up its own server.
         with multiprocessing.Pool(opt.clients) as pool:
             for s in suites:
                 print(f"\n[{s}]", flush=True)
-                {"throughput": suite_throughput, "blocking": suite_blocking,
-                 "correctness": suite_correctness}[s](opt, pool, failures)
+                try:
+                    {"throughput": suite_throughput, "blocking": suite_blocking,
+                     "correctness": suite_correctness}[s](opt, pool, failures)
+                except PoolStuck as exc:
+                    failures.append(str(exc))
+                    print(f"  중단: {exc}", flush=True)
+                    break  # the shared pool may hold a dead worker's task
     finally:
         if snapshot_dir:
             shutil.rmtree(snapshot_dir, ignore_errors=True)
