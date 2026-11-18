@@ -12,33 +12,40 @@ Suites (run all by default, or pick with --suite):
                --pause seconds before the body (network time a worker waits
                through outside the mutex)
   blocking     id lookup latency alone, then while name lookups keep the
-               global mutex busy (4.5절: the DB part runs one at a time)
+               global mutex busy (4.5절: the DB part runs one at a time). The
+               two loads run on a fixed shared schedule and the script checks
+               that they really overlapped.
   correctness  concurrent INSERTs from many clients: no duplicate id, row
                count and every row match what the clients were told, and the
                same after a kill + restart (no shutdown handler, 4.4절)
 
-Every run starts the server in a fresh temp directory. The throughput and
-blocking suites copy --data (a users.sans made by bench/index_bench, names
-user<id>) there; correctness starts from an empty table. Server stderr goes to
-a file and lines containing "ThreadSanitizer" are counted, so the same script
-checks a -fsanitize=thread build (see docs/parallel.md).
+Every run starts the server in a fresh temp directory. --data (a users.sans
+made by bench/index_bench, names user<id>) is copied once to a private
+snapshot at start; every server and the client id range use that snapshot.
+correctness starts from an empty table. Server stderr goes to a file and lines
+containing "WARNING: ThreadSanitizer" are counted, so the same script checks a
+-fsanitize=thread build (see docs/parallel.md).
+
+Every response is checked, including ones that arrive after a run's time
+window; only responses inside the window count toward requests/s and latency.
 
   python3 bench/load_test.py --server ./dbms_server --data bench_1m.sans
   python3 bench/load_test.py --server ./dbms_server_tsan --suite correctness
 
-Exit code 1 if any response is wrong, any request fails, or TSan reported.
+Exit code 1 if any response is wrong, any request fails, a run has no samples,
+the TSan log cannot be read, or TSan reported. Exit code 2 for bad arguments.
 """
 
 import argparse
 import http.client
 import json
+import math
 import multiprocessing
 import os
 import pathlib
 import random
 import shutil
 import socket
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -47,6 +54,11 @@ import time
 
 START_TIMEOUT = 30
 REQUEST_TIMEOUT = 120
+
+# A request that fails in any of these ways is counted as an error by name,
+# never allowed to end the run with a traceback (that would lose the table,
+# the TSan count and the exit code).
+REQUEST_ERRORS = (OSError, http.client.HTTPException, ValueError, IndexError)
 
 
 # ---------- server process ----------
@@ -58,16 +70,20 @@ def free_port():
 
 
 class Server:
-    """dbms_server in its own temp directory. stop() kills it like Ctrl+C."""
+    """dbms_server in its own temp directory. kill() is like Ctrl+C."""
 
-    def __init__(self, exe, threads, data=None, workdir=None):
+    def __init__(self, exe, threads, data=None):
         self.exe = pathlib.Path(exe).resolve()
         self.threads = threads
-        self.own_dir = workdir is None
-        self.dir = pathlib.Path(workdir or tempfile.mkdtemp(prefix="dbms_load_"))
-        if data is not None:
-            shutil.copyfile(data, self.dir / "users.sans")
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="dbms_load_"))
+        try:
+            if data is not None:
+                shutil.copyfile(data, self.dir / "users.sans")
+        except BaseException:
+            shutil.rmtree(self.dir, ignore_errors=True)  # no partial copy left behind
+            raise
         self.stderr_path = self.dir / "server_stderr.txt"
+        self.stderr_file = None
         self.proc = None
         self.port = None
 
@@ -84,7 +100,7 @@ class Server:
         reader.join(START_TIMEOUT)
         if not lines or b"listening on" not in lines[0]:
             self.kill()
-            raise RuntimeError(f"server did not start: {lines!r} {self.stderr_text()!r}")
+            raise RuntimeError(f"server did not start: {lines!r} {self.stderr_text(strict=False)!r}")
         deadline = time.monotonic() + START_TIMEOUT
         while True:
             try:
@@ -104,20 +120,42 @@ class Server:
             self.stderr_file.close()
             self.proc = None
 
-    def stderr_text(self):
+    def stderr_text(self, strict=True):
+        """The server's stderr so far. strict: a read failure raises instead of
+        looking like an empty (clean) log."""
         try:
             return self.stderr_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            if strict:
+                raise
             return ""
 
-    def tsan_reports(self):
-        return sum(1 for line in self.stderr_text().splitlines()
-                   if "WARNING: ThreadSanitizer" in line)
+    def tsan_reports(self, failures, label):
+        """Count of TSan warnings so far. If the log cannot be read the run is a
+        failure (not "0 warnings") and -1 is returned."""
+        try:
+            text = self.stderr_text()
+        except OSError as exc:
+            failures.append(f"{label}: cannot read server stderr ({exc})")
+            return -1
+        return sum(1 for line in text.splitlines() if "WARNING: ThreadSanitizer" in line)
 
     def cleanup(self):
         self.kill()
-        if self.own_dir:
-            shutil.rmtree(self.dir, ignore_errors=True)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def parse_response(raw):
+    """(status, JSON or None) from a raw HTTP response; ConnectionError if no
+    status line arrived (server closed without answering)."""
+    head, _, body = raw.partition(b"\r\n\r\n")
+    parts = head.split(b" ", 2)
+    if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or not parts[1].isdigit():
+        raise ConnectionError(f"no HTTP status line: {head[:40]!r}")
+    try:
+        return int(parts[1]), json.loads(body)
+    except ValueError:
+        return int(parts[1]), None
 
 
 def post_slow(port, sql, pause):
@@ -138,11 +176,11 @@ def post_slow(port, sql, pause):
         while b"\r\n\r\n" not in data:
             chunk = sock.recv(65536)
             if not chunk:
-                break
+                raise ConnectionError("closed before 100 Continue")
             data += chunk
         interim, _, data = data.partition(b"\r\n\r\n")
         if not interim.startswith(b"HTTP/1.1 100"):
-            raise OSError(f"expected 100 Continue, got {interim[:40]!r}")
+            raise ConnectionError(f"expected 100 Continue, got {interim[:40]!r}")
         time.sleep(pause)
         sock.sendall(body)
         chunks = [data]
@@ -151,12 +189,7 @@ def post_slow(port, sql, pause):
             if not chunk:
                 break
             chunks.append(chunk)
-    raw_head, _, raw_body = b"".join(chunks).partition(b"\r\n\r\n")
-    status = int(raw_head.split(b" ", 2)[1])
-    try:
-        return status, json.loads(raw_body)
-    except ValueError:
-        return status, None
+    return parse_response(b"".join(chunks))
 
 
 def post(port, sql):
@@ -166,7 +199,7 @@ def post(port, sql):
     try:
         conn.request("POST", "/query", body=sql.encode())
         resp = conn.getresponse()
-        data = resp.read()
+        data = resp.read()  # IncompleteRead (an HTTPException) if cut short
         try:
             return resp.status, json.loads(data)
         except ValueError:
@@ -175,34 +208,58 @@ def post(port, sql):
         conn.close()
 
 
-# ---------- client processes ----------
+# ---------- response checks (never raise on a malformed body) ----------
+
+def first_result(body):
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        return None
+    results = body.get("results")
+    if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
+        return None
+    return results[0]
+
 
 def check_select(body, want_id):
-    try:
-        rows = body["results"][0]["rows"]
-    except (KeyError, IndexError, TypeError):
+    result = first_result(body)
+    if result is None or result.get("type") != "select":
         return False
-    return (body.get("ok") is True and len(rows) == 1 and rows[0]["id"] == want_id
-            and rows[0]["name"] == f"user{want_id}" and rows[0]["age"] == want_id % 100)
+    rows = result.get("rows")
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return False
+    row = rows[0]
+    return (row.get("id") == want_id and row.get("name") == f"user{want_id}"
+            and row.get("age") == want_id % 100)
 
+
+def insert_id(body):
+    """The new id if body is a successful INSERT result, else None."""
+    result = first_result(body)
+    if result is None or result.get("type") != "insert":
+        return None
+    rid = result.get("id")
+    return rid if isinstance(rid, int) and not isinstance(rid, bool) else None
+
+
+# ---------- client processes ----------
 
 def client_loop(args):
     """Closed loop: send the next request as soon as the last one answers.
-    Counts only requests that finish inside [start_at, start_at + duration]."""
+    All times are time.monotonic(), which is system-wide, so processes share
+    start_at. Every response is checked; only those finishing inside
+    [start_at, start_at + duration] count toward done and latency."""
     port, kind, rows, seed, start_at, duration, insert_ratio, pause = args
     rng = random.Random(seed)
     lat = []
     done = 0
     wrong = 0
     errors = {}
-    while time.time() < start_at:
+    first = None
+    last = None
+    while time.monotonic() < start_at:
         time.sleep(0.001)
     end_at = start_at + duration
     seq = 0
-    while True:
-        now = time.time()
-        if now >= end_at:
-            break
+    while time.monotonic() < end_at:
         if kind == "mixed" and rng.random() < insert_ratio:
             sql = f"INSERT INTO users VALUES ('load{seed}_{seq}', 7);"
             want = None
@@ -213,43 +270,53 @@ def client_loop(args):
             value = f"'user{target}'" if column == "name" else str(target)
             sql = f"SELECT * FROM users WHERE {column} = {value};"
             want = target
-        t0 = time.perf_counter()
+        t0 = time.monotonic()
+        if first is None:
+            first = t0
         try:
             status, body = post_slow(port, sql, pause) if kind == "slow" else post(port, sql)
-        except OSError as exc:
+        except REQUEST_ERRORS as exc:
             errors[type(exc).__name__] = errors.get(type(exc).__name__, 0) + 1
             continue
-        elapsed = time.perf_counter() - t0
-        if time.time() > end_at:
-            break
+        t1 = time.monotonic()
+        last = t1
         if status != 200:
             errors[str(status)] = errors.get(str(status), 0) + 1
             continue
-        ok = (check_select(body, want) if want is not None else
-              body is not None and body.get("ok") is True
-              and body["results"][0].get("type") == "insert")
+        ok = check_select(body, want) if want is not None else insert_id(body) is not None
         if not ok:
             wrong += 1
-        done += 1
-        lat.append(elapsed)
-    return done, wrong, errors, lat
+        if t1 <= end_at:  # late responses are checked above but not timed
+            done += 1
+            lat.append(t1 - t0)
+    return {"done": done, "wrong": wrong, "errors": errors, "lat": lat,
+            "first": first, "last": last}
+
+
+def make_jobs(port, kind, rows, clients, start_at, duration, insert_ratio, seed0, pause):
+    return [(port, kind, rows, seed0 + i, start_at, duration, insert_ratio, pause)
+            for i in range(clients)]
+
+
+def aggregate(results, duration):
+    errors = {}
+    for r in results:
+        for k, v in r["errors"].items():
+            errors[k] = errors.get(k, 0) + v
+    lat = sorted(x for r in results for x in r["lat"])
+    done = sum(r["done"] for r in results)
+    firsts = [r["first"] for r in results if r["first"] is not None]
+    lasts = [r["last"] for r in results if r["last"] is not None]
+    return {"done": done, "wrong": sum(r["wrong"] for r in results), "errors": errors,
+            "rps": done / duration, "p50_ms": pct(lat, 50) * 1e3, "p99_ms": pct(lat, 99) * 1e3,
+            "first": min(firsts) if firsts else None, "last": max(lasts) if lasts else None}
 
 
 def run_clients(pool, port, kind, rows, clients, duration, insert_ratio=0.2, seed0=1,
                 pause=0.1):
-    start_at = time.time() + 1.0
-    jobs = [(port, kind, rows, seed0 + i, start_at, duration, insert_ratio, pause)
-            for i in range(clients)]
-    results = pool.map(client_loop, jobs)
-    done = sum(r[0] for r in results)
-    wrong = sum(r[1] for r in results)
-    errors = {}
-    for r in results:
-        for k, v in r[2].items():
-            errors[k] = errors.get(k, 0) + v
-    lat = sorted(x for r in results for x in r[3])
-    return {"done": done, "wrong": wrong, "errors": errors, "rps": done / duration,
-            "p50_ms": pct(lat, 50) * 1e3, "p99_ms": pct(lat, 99) * 1e3}
+    start_at = time.monotonic() + 1.0
+    jobs = make_jobs(port, kind, rows, clients, start_at, duration, insert_ratio, seed0, pause)
+    return aggregate(pool.map(client_loop, jobs), duration)
 
 
 def pct(sorted_values, p):
@@ -263,13 +330,19 @@ def data_rows(path):
     """Row count from the .sans header (offset 16, little-endian u64)."""
     with open(path, "rb") as f:
         head = f.read(32)
+    if len(head) < 32 or head[:4] != b"SANS":
+        raise ValueError(f"{path} is not a .sans file")
     return int.from_bytes(head[16:24], "little")
+
+
+def failed(r):
+    return bool(r["wrong"] or r["errors"] or r["done"] == 0)
 
 
 # ---------- suites ----------
 
 def suite_throughput(opt, pool, failures):
-    rows = data_rows(opt.data)
+    rows = opt.rows
     kinds = [("id", "id 조회만", opt.duration),
              ("name", "name 조회만", opt.name_duration),
              ("mixed", "id 80% + INSERT 20%", opt.duration),
@@ -283,14 +356,14 @@ def suite_throughput(opt, pool, failures):
                 server.start()
                 r = run_clients(pool, server.port, kind, rows, opt.clients, duration,
                                 pause=opt.pause)
-                r["tsan"] = server.tsan_reports()
+                r["tsan"] = server.tsan_reports(failures, f"throughput threads={threads} {kind}")
             finally:
                 server.cleanup()
             table[(threads, kind)] = r
             print(f"  threads={threads} {kind}: {r['rps']:.1f} req/s, "
                   f"p50 {r['p50_ms']:.2f}ms, p99 {r['p99_ms']:.2f}ms, done {r['done']}, "
                   f"wrong {r['wrong']}, errors {r['errors']}, tsan {r['tsan']}", flush=True)
-            if r["wrong"] or r["errors"] or r["tsan"] or r["done"] == 0:
+            if failed(r) or r["tsan"]:
                 failures.append(f"throughput threads={threads} {kind}")
 
     print(f"\n## 처리량 (클라이언트 프로세스 {opt.clients}개, 데이터 {rows:,}행)\n")
@@ -300,7 +373,8 @@ def suite_throughput(opt, pool, failures):
         cells = [f"{table[(t, kind)]['rps']:,.0f}" if table[(t, kind)]['rps'] >= 100
                  else f"{table[(t, kind)]['rps']:.1f}" for t in opt.threads]
         print(f"| {label} (초당 요청, {duration:g}초) | " + " | ".join(cells) + " |")
-    print("\n| 작업 | " + " | ".join(f"스레드 {t}" for t in opt.threads) + " |")
+    print("\n응답 시간은 측정 구간 안에 끝난 요청만 표본이에요(구간 뒤 응답은 검사만 해요).\n")
+    print("| 작업 | " + " | ".join(f"스레드 {t}" for t in opt.threads) + " |")
     print("| --- |" + " --- |" * len(opt.threads))
     for kind, label, _ in kinds:
         cells = [f"{table[(t, kind)]['p50_ms']:.1f} / {table[(t, kind)]['p99_ms']:.1f}"
@@ -309,29 +383,40 @@ def suite_throughput(opt, pool, failures):
 
 
 def suite_blocking(opt, pool, failures):
-    rows = data_rows(opt.data)
+    """id lookups alone, then id lookups inside a window where name lookups run.
+    Both loads get fixed start times on one clock: name runs [t0, t0+D+2] and
+    the measured id run is [t0+1, t0+1+D], so the id run sits inside the name
+    run. The actual first request and last response of each run are checked."""
+    rows = opt.rows
     threads = max(opt.threads)
+    D = opt.duration
     server = Server(opt.server, threads, data=opt.data)
+    bg_pool = multiprocessing.Pool(opt.name_clients)
     try:
         server.start()
-        alone = run_clients(pool, server.port, "id", rows, 1, opt.duration, seed0=101)
-        # name clients run on a background thread; the id client runs in the pool.
-        name_box = {}
-        bg_pool = multiprocessing.Pool(opt.name_clients)
-        bg = threading.Thread(target=lambda: name_box.update(run_clients(
-            bg_pool, server.port, "name", rows, opt.name_clients, opt.duration + 2, seed0=201)))
-        bg.start()
-        time.sleep(1.5)  # let the name clients start (they begin 1s after submit)
-        busy = run_clients(pool, server.port, "id", rows, 1, opt.duration, seed0=301)
-        bg.join()
+        alone = run_clients(pool, server.port, "id", rows, 1, D, seed0=101)
+
+        t0 = time.monotonic() + 1.5
+        name_async = bg_pool.map_async(client_loop, make_jobs(
+            server.port, "name", rows, opt.name_clients, t0, D + 2, 0.0, 201, opt.pause))
+        busy = aggregate(pool.map(client_loop, make_jobs(
+            server.port, "id", rows, 1, t0 + 1, D, 0.0, 301, opt.pause)), D)
+        # get() re-raises an exception from the name clients instead of losing it
+        name = aggregate(name_async.get(timeout=D + 2 + REQUEST_TIMEOUT + 30), D + 2)
+        tsan = server.tsan_reports(failures, "blocking")
+    finally:
         bg_pool.close()
         bg_pool.join()
-        tsan = server.tsan_reports()
-    finally:
         server.cleanup()
-    for name, r in (("alone", alone), ("busy", busy), ("name", name_box)):
-        if r.get("wrong") or r.get("errors"):
-            failures.append(f"blocking {name}")
+
+    overlapped = (name["first"] is not None and busy["first"] is not None
+                  and name["last"] is not None and busy["last"] is not None
+                  and name["first"] <= busy["first"] and name["last"] >= busy["last"])
+    for label, r in (("alone", alone), ("busy", busy), ("name", name)):
+        if failed(r):
+            failures.append(f"blocking {label}")
+    if not overlapped:
+        failures.append("blocking: name load did not cover the id run")
     if tsan:
         failures.append("blocking tsan")
     print(f"\n## 막힘 확인 (서버 스레드 {threads}, id 조회 클라이언트 1개)\n")
@@ -340,8 +425,8 @@ def suite_blocking(opt, pool, failures):
     print(f"| id 조회만 | {alone['rps']:,.0f} | {alone['p50_ms']:.2f} | {alone['p99_ms']:.2f} |")
     print(f"| name 조회 클라이언트 {opt.name_clients}개가 계속 도는 동안 | {busy['rps']:,.1f} | "
           f"{busy['p50_ms']:.2f} | {busy['p99_ms']:.2f} |")
-    print(f"\n같은 동안 name 조회: 초당 {name_box.get('rps', 0):.1f}, "
-          f"p50 {name_box.get('p50_ms', 0):.1f}ms. TSan 보고 {tsan}")
+    print(f"\n같은 동안 name 조회: 초당 {name['rps']:.1f}, p50 {name['p50_ms']:.1f}ms. "
+          f"두 부하가 실제로 겹침: {'예' if overlapped else '아니요'}. TSan 보고 {tsan}")
 
 
 def suite_correctness(opt, pool, failures):
@@ -351,39 +436,45 @@ def suite_correctness(opt, pool, failures):
     server = Server(opt.server, max(opt.threads))
     try:
         server.start()
-        start_at = time.time() + 1.0
+        start_at = time.monotonic() + 1.0
         jobs = [(server.port, c, per[c], start_at) for c in range(clients)]
         results = pool.map(insert_worker, jobs)
         sent = {}
         problems = []
+        duplicates = 0
         for c, (ok_ids, errs) in enumerate(results):
             problems.extend(errs)
             for i, rid in ok_ids:
                 if rid in sent:
+                    duplicates += 1
                     problems.append(f"duplicate id {rid}")
                 sent[rid] = (f"c{c}_{i}", c)
         rows_now = select_all(server.port)
         server.kill()  # like Ctrl+C: no shutdown handler
         server.start()  # same directory and users.sans; stderr file is appended
         rows_restart = select_all(server.port)
-        status, body = post(server.port, "INSERT INTO users VALUES ('after_restart', 1);")
-        next_id = body["results"][0]["id"] if status == 200 and body and body.get("ok") else None
-        tsan = server.tsan_reports()  # both runs
+        try:
+            status, body = post(server.port, "INSERT INTO users VALUES ('after_restart', 1);")
+            next_id = insert_id(body) if status == 200 else None
+        except REQUEST_ERRORS:
+            next_id = None
+        tsan = server.tsan_reports(failures, "correctness")  # both runs
     finally:
         server.cleanup()
 
     def same(rows):
-        return (len(rows) == total and {r["id"] for r in rows} == set(sent)
-                and all(sent[r["id"]] == (r["name"], r["age"]) for r in rows))
+        return (rows is not None and len(rows) == total and {r.get("id") for r in rows} == set(sent)
+                and all(sent.get(r.get("id")) == (r.get("name"), r.get("age")) for r in rows))
 
-    ok_count = len(sent) == total
-    ids_dense = set(sent) == set(range(1, total + 1))
     checks = [
-        ("INSERT 응답 수 = 보낸 수", ok_count, f"{len(sent):,} / {total:,}"),
-        ("응답 id 중복 없음", not any("duplicate" in p for p in problems), "0" if not problems else problems[:3]),
-        ("id가 1..N 빈틈 없음", ids_dense, f"{min(sent) if sent else '-'}..{max(sent) if sent else '-'}"),
-        ("SELECT * 행 = 응답 (id·name·age)", same(rows_now), f"{len(rows_now):,}행"),
-        ("강제 종료 뒤 재시작해도 같음", same(rows_restart), f"{len(rows_restart):,}행"),
+        ("INSERT 응답 수 = 보낸 수", len(sent) == total and not problems, f"{len(sent):,} / {total:,}"),
+        ("응답 id 중복 없음", duplicates == 0, str(duplicates)),
+        ("id가 1..N 빈틈 없음", set(sent) == set(range(1, total + 1)),
+         f"{min(sent) if sent else '-'}..{max(sent) if sent else '-'}"),
+        ("SELECT * 행 = 응답 (id·name·age)", same(rows_now),
+         f"{len(rows_now):,}행" if rows_now is not None else "응답 오류"),
+        ("강제 종료 뒤 재시작해도 같음", same(rows_restart),
+         f"{len(rows_restart):,}행" if rows_restart is not None else "응답 오류"),
         ("재시작 뒤 다음 id = N+1", next_id == total + 1, str(next_id)),
         ("TSan 보고 없음", tsan == 0, str(tsan)),
     ]
@@ -400,28 +491,35 @@ def suite_correctness(opt, pool, failures):
 
 def insert_worker(args):
     port, c, count, start_at = args
-    while time.time() < start_at:
+    while time.monotonic() < start_at:
         time.sleep(0.001)
     ok_ids = []
     errs = []
     for i in range(count):
         try:
             status, body = post(port, f"INSERT INTO users VALUES ('c{c}_{i}', {c});")
-        except OSError as exc:
+        except REQUEST_ERRORS as exc:
             errs.append(f"client {c} insert {i}: {type(exc).__name__}")
             continue
-        if status != 200 or not body or not body.get("ok"):
-            errs.append(f"client {c} insert {i}: HTTP {status} {body}")
+        rid = insert_id(body) if status == 200 else None
+        if rid is None:
+            errs.append(f"client {c} insert {i}: HTTP {status} {str(body)[:80]}")
             continue
-        ok_ids.append((i, body["results"][0]["id"]))
+        ok_ids.append((i, rid))
     return ok_ids, errs
 
 
 def select_all(port):
-    status, body = post(port, "SELECT * FROM users;")
-    if status != 200 or not body or not body.get("ok"):
-        return []
-    return body["results"][0]["rows"]
+    """All rows as a list of dicts, or None if the response is not a valid SELECT."""
+    try:
+        status, body = post(port, "SELECT * FROM users;")
+    except REQUEST_ERRORS:
+        return None
+    result = first_result(body) if status == 200 else None
+    rows = result.get("rows") if result is not None and result.get("type") == "select" else None
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        return None
+    return rows
 
 
 def main():
@@ -432,29 +530,66 @@ def main():
                     default="all")
     ap.add_argument("--threads", default="1,2,4,8", help="server --threads values")
     ap.add_argument("--clients", type=int, default=16, help="client processes")
-    ap.add_argument("--duration", type=float, default=5.0, help="seconds per id/mixed run")
+    ap.add_argument("--duration", type=float, default=5.0, help="seconds per id/mixed/slow run")
     ap.add_argument("--name-duration", type=float, default=5.0, help="seconds per name run")
     ap.add_argument("--name-clients", type=int, default=2, help="name clients in blocking")
     ap.add_argument("--inserts", type=int, default=10000, help="INSERTs in correctness")
     ap.add_argument("--pause", type=float, default=0.1,
-                    help="seconds a slow client waits between headers and body")
+                    help="seconds a slow upload waits after 100 Continue")
     opt = ap.parse_args()
-    opt.threads = [int(t) for t in opt.threads.split(",")]
+    try:
+        opt.threads = [int(t) for t in opt.threads.split(",")]
+    except ValueError:
+        ap.error("--threads must be a comma-separated list of integers")
     suites = ["throughput", "blocking", "correctness"] if opt.suite == "all" else [opt.suite]
+    if any(t < 1 or t > 256 for t in opt.threads):
+        ap.error("--threads values must be 1..256 (server limit)")
+    if opt.clients < 1 or opt.name_clients < 1:
+        ap.error("--clients and --name-clients must be at least 1")
+    for name in ("duration", "name_duration"):
+        value = getattr(opt, name)
+        if not math.isfinite(value) or value <= 0:
+            ap.error(f"--{name.replace('_', '-')} must be a finite number > 0")
+    if not math.isfinite(opt.pause) or opt.pause < 0:
+        ap.error("--pause must be a finite number >= 0")
+    if "correctness" in suites and opt.inserts < 1:
+        ap.error("--inserts must be at least 1")
     if any(s in suites for s in ("throughput", "blocking")) and not opt.data:
         ap.error("--data is required for throughput and blocking")
 
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="backslashreplace")
+
+    snapshot_dir = None
+    if opt.data:
+        # Fix the input once: every server copies this snapshot, and the client
+        # id range comes from it, so a later change to --data cannot split them.
+        snapshot_dir = tempfile.mkdtemp(prefix="dbms_load_data_")
+        snapshot = pathlib.Path(snapshot_dir) / "users.sans"
+        try:
+            shutil.copyfile(opt.data, snapshot)
+            opt.rows = data_rows(snapshot)
+        except (OSError, ValueError) as exc:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+            ap.error(f"--data: {exc}")
+        if opt.rows < 1:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+            ap.error("--data has no rows")
+        opt.data = snapshot
+
     print(f"# load_test\n\n서버: {opt.server}, CPU {os.cpu_count()}개, Python "
           f"{sys.version.split()[0]}, 클라이언트 프로세스 {opt.clients}개")
     failures = []
-    with multiprocessing.Pool(opt.clients) as pool:
-        for s in suites:
-            print(f"\n[{s}]", flush=True)
-            {"throughput": suite_throughput, "blocking": suite_blocking,
-             "correctness": suite_correctness}[s](opt, pool, failures)
+    try:
+        with multiprocessing.Pool(opt.clients) as pool:
+            for s in suites:
+                print(f"\n[{s}]", flush=True)
+                {"throughput": suite_throughput, "blocking": suite_blocking,
+                 "correctness": suite_correctness}[s](opt, pool, failures)
+    finally:
+        if snapshot_dir:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
     print("\n결과: " + ("통과" if not failures else "실패 " + ", ".join(failures)))
     return 1 if failures else 0
 
