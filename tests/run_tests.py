@@ -148,6 +148,12 @@ def run_python(name, script, required):
 
 def main():
     global GCC
+    # Child output is decoded as UTF-8 (see run()), so diagnostics may hold
+    # characters the console or redirect encoding (cp1252, cp949) cannot
+    # represent. Escape just those instead of stopping before the summary.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     GCC = resolve_gcc()
 
     run_python(

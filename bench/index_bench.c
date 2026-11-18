@@ -19,7 +19,8 @@
  * 파일이 없으면 행 수만큼 INSERT해서 만들고(삽입 시간도 출력), 있으면 이 프로그램이
  * 만든 형식(id i의 이름이 user<i>, 나이 i % 100)인지 확인한 뒤 그대로 써요.
  * -pthread는 MinGW-w64의 clock_gettime(winpthreads) 때문이고 Linux에서는 영향이
- * 없어요. 측정 도중 오류가 나면 표를 내지 않고 종료 코드 1이에요.
+ * 없어요. 측정 도중 저장 API·닫기·시간 읽기 오류가 나면 시간표를 내지 않고 종료
+ * 코드 1이에요. 호출은 성공했는데 결과가 다르면 표와 함께 불일치 수를 내고 1이에요.
  */
 #include "../storage.c"
 #include "../bptree.c"
@@ -431,10 +432,16 @@ int main(int argc, char **argv) {
         Probe c = a;
         size_t count = 0;
 
+        /* 저장 API 오류는 측정 실패라 표 없이 끝내요. 호출은 성공했는데 결과가
+         * 다르면 불일치로 세요. */
         uint64_t t0 = now_ns();
         st = storage_find_by_id(s, ids[i], copy_row, &a, &count);
         t_index[i] = now_ns() - t0;
-        if (st != DB_OK || a.matched != 1) {
+        if (st != DB_OK) {
+            fprintf(stderr, "① id %" PRId64 " 조회 실패: %s\n", ids[i], status_name(st));
+            goto done;
+        }
+        if (a.matched != 1) {
             mismatches++;
         }
 
@@ -443,7 +450,11 @@ int main(int argc, char **argv) {
             st = storage_scan(s, match_id, &b, &count);
             t_lin_id[i] = now_ns() - t0;
             lin_id_runs++;
-            if (st != DB_OK || b.matched != 1 || !same_row(&a.row, &b.row)) {
+            if (st != DB_OK) {
+                fprintf(stderr, "② id %" PRId64 " 순회 실패: %s\n", ids[i], status_name(st));
+                goto done;
+            }
+            if (b.matched != 1 || !same_row(&a.row, &b.row)) {
                 mismatches++;
             }
         }
@@ -451,7 +462,11 @@ int main(int argc, char **argv) {
         t0 = now_ns();
         st = storage_scan(s, match_name, &c, &count);
         t_lin_name[i] = now_ns() - t0;
-        if (st != DB_OK || c.matched != 1 || !same_row(&a.row, &c.row)) {
+        if (st != DB_OK) {
+            fprintf(stderr, "③ %s 순회 실패: %s\n", name, status_name(st));
+            goto done;
+        }
+        if (c.matched != 1 || !same_row(&a.row, &c.row)) {
             mismatches++;
         }
     }
@@ -462,11 +477,15 @@ int main(int argc, char **argv) {
         Probe a = {absent[i], "", 0, {0}};
         Probe b = a;
         size_t count = 0;
-        if (storage_find_by_id(s, absent[i], copy_row, &a, &count) != DB_OK ||
-            a.matched != 0) {
-            mismatches++;
+        st = storage_find_by_id(s, absent[i], copy_row, &a, &count);
+        if (st == DB_OK) {
+            st = storage_scan(s, match_id, &b, &count);
         }
-        if (storage_scan(s, match_id, &b, &count) != DB_OK || b.matched != 0) {
+        if (st != DB_OK) {
+            fprintf(stderr, "없는 id %" PRId64 " 조회 실패: %s\n", absent[i], status_name(st));
+            goto done;
+        }
+        if (a.matched != 0 || b.matched != 0) {
             mismatches++;
         }
     }
