@@ -156,6 +156,10 @@ flowchart TD
 
 - `storage_open()`이 파일 전체를 한 번 읽어 트리를 만들어요. 메모리 기반이라 트리는 파일에 저장하지 않아요.
 - CLI는 SQL 파일 하나마다 프로그램을 새로 켜므로, 켤 때마다 이 비용이 들어요. 구축 시간은 측정에서 따로 보고해요([3.5절](#35-성능-측정-안건-5-c)).
+- **재구축이 끝까지 가지 못할 때(추론):**
+  - 메모리 부족: `storage_open()`이 `DB_ERR_NOMEM`을 돌려주고 `*out_storage`는 `NULL`이에요. 지금 `Storage` 할당 실패와 같은 처리예요.
+  - 읽기 오류: `DB_ERR_IO`, `NULL`이에요. 지금 열기의 읽기 실패와 같아요.
+  - 레코드 손상: 열기는 성공해요. 트리를 버리고 [3.1절](#31-인덱스-소유-안건-3-a)의 "인덱스 안 씀" 표시를 남겨요. 손상은 지금처럼 `storage_scan()`이 그때까지의 `count`와 함께 `DB_ERR_CORRUPT`로 알려요. 열기에서 실패시키면 기존 테스트 T-19·T-28·T-29(`tests/storage_test.c`, 열기 성공 뒤 scan의 `count`가 1·1·2)가 깨져요.
 
 ### 3.4 정확성 검증 (안건 12: 기본값)
 
@@ -206,7 +210,9 @@ flowchart TD
 - 응답은 JSON이에요. 문장별 결과 목록이고, 오류면 문장 번호와 메시지를 담아요.
 - 요청 하나에 문장 여러 개를 허용해요. 지금 파서처럼 첫 오류에서 멈춰요. 트랜잭션이 없어서 오류 앞 문장은 이미 저장됐고, 응답의 `results`에 그 결과가 남아요.
 - JSON 이스케이프는 따옴표·역슬래시·제어 문자만 처리해요. UTF-8이 아닌 바이트는 다루지 않아요.
-- `category`는 지금 `main.c`의 `status_category()` 이름(`syntax`, `type`, `io` 등)을 그대로 써요.
+- `category`와 `message`는 CLI와 같은 문자열을 써요. `main.c`의 `status_category()`·`status_cause()`는 `static`이라 서버에서 부를 수 없으므로, 두 함수를 `server.c`에 복사해요(추론). `main.c`와 `dbms.h`는 고치지 않아요.
+  - `category`: `syntax`, `argument`, `schema`, `type`, `range`, `memory`, `io`, `corrupt`, `output`, `write-uncertain`.
+  - `message`: 문법 오류는 `parse_next()`가 채운 `error` 문자열(비어 있으면 `status_cause()` 문구), 그 밖에는 `status_cause()` 문구예요. CLI가 표준 오류에 쓰는 것과 같아요.
 
 | 상태 | 경우 |
 | --- | --- |
@@ -379,7 +385,8 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 
 - 실행기: `WHERE id = 정수`이고 지금 검증(1 이상)을 통과하면 `storage_find_by_id()`를 불러요. 나머지는 지금 `storage_scan()` 경로 그대로예요.
 - Notion 초안에 있던 측정용 `storage_set_index_enabled()`와 CLI 환경 변수(`DBMS_TIMING`, `DBMS_NO_INDEX`)는 안건 5가 C로 정해져 넣지 않아요. 비교군 ②는 측정 프로그램이 `storage_scan()`으로 재요(추론).
-- 서버 파일 구성(`server.c`, 스레드 풀, HTTP 처리)과 실행 인자는 [4.4절](#44-스레드-풀-안건-8-전부-a)대로예요.
+- `storage_open()`은 선언이 그대로예요. 재구축이 끝까지 가지 못할 때의 결과는 [3.3절](#33-인덱스를-만드는-시점-안건-11-a)대로예요.
+- 서버 파일 구성(`server.c`, 스레드 풀, HTTP 처리)과 실행 인자는 [4.4절](#44-스레드-풀-안건-8-전부-a)대로예요. 오류 `category`·`message`의 출처는 [4.3절](#43-요청응답-형식-안건-7-a)대로예요.
 - 계약 PR에서 [architecture.md 7절](architecture.md#7-세부-설계에서-확정할-사항)의 Phase 2·3 항목도 이 결정으로 채워요.
 
 ## 7. 완료 기준
