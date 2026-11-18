@@ -92,15 +92,21 @@ class Server:
     def start(self):
         self.port = free_port()
         self.stderr_file = open(self.stderr_path, "ab")
-        # A TSAN_OPTIONS log_path inherited from the shell would send warnings
-        # to another file, and this log would look clean. Keep the other
-        # options; the later log_path wins.
-        env = os.environ.copy()
-        tsan_options = env.get("TSAN_OPTIONS", "").strip()
-        env["TSAN_OPTIONS"] = (tsan_options + " " if tsan_options else "") + "log_path=stderr"
-        self.proc = subprocess.Popen(
-            [str(self.exe), "--port", str(self.port), "--threads", str(self.threads)],
-            cwd=str(self.dir), stdout=subprocess.PIPE, stderr=self.stderr_file, env=env)
+        try:
+            # 셸에서 물려받은 TSAN_OPTIONS가 이 검사를 속일 수 있어요: log_path=…는
+            # 경고를 다른 파일로 보내고(이 로그가 깨끗해 보임) report_bugs=0은 보고를
+            # 아예 꺼요. 다른 옵션은 그대로 두고, 뒤에 오는 값이 이겨요.
+            env = os.environ.copy()
+            tsan_options = env.get("TSAN_OPTIONS", "").strip()
+            env["TSAN_OPTIONS"] = (tsan_options + " " if tsan_options else "") + \
+                "log_path=stderr report_bugs=1"
+            self.proc = subprocess.Popen(
+                [str(self.exe), "--port", str(self.port), "--threads", str(self.threads)],
+                cwd=str(self.dir), stdout=subprocess.PIPE, stderr=self.stderr_file, env=env)
+        except BaseException:
+            self.stderr_file.close()
+            self.stderr_file = None
+            raise
         lines = []
         reader = threading.Thread(target=lambda: lines.append(self.proc.stdout.readline()),
                                   daemon=True)
@@ -145,6 +151,9 @@ class Server:
         if self.proc is not None and self.proc.poll() is not None:
             failures.append(f"{label}: server exited on its own "
                             f"(code {self.proc.returncode}) before it was stopped")
+        # 위 poll()과 아래 kill() 사이에 터진 크래시는 self.proc에 실제 종료 코드를
+        # 남기지만 여기서는 실패로 기록되지 않아요. 창이 밀리초 미만이라 kill()에서
+        # 신호 코드(-SIGKILL 대 -SIGSEGV)를 구분하는 책킵 대신 수용해요.
         self.kill()
 
     def tsan_reports(self, failures, label):
@@ -508,7 +517,10 @@ def suite_correctness(opt, pool, failures):
         sent = {}
         problems = []
         duplicates = 0
-        spans = []  # (first INSERT sent, last INSERT answered) per client
+        # 요청 단위 구간이 아니라 클라이언트별 [첫 요청, 마지막 응답] 스팬이에요.
+        # insert_worker는 요청 사이 간극 없이 루프하므로 스팬이 겹치면 실제 INSERT
+        # 요청도 겹칩니다(docs/parallel.md 1장).
+        spans = []  # 클라이언트별 (보낸 첫 INSERT, 응답 온 마지막 INSERT)
         for c, (ok_ids, errs, first, last) in enumerate(results):
             problems.extend(errs)
             if first is not None and last is not None:
@@ -683,6 +695,12 @@ def main():
                     failures.append(str(exc))
                     print(f"  중단: {exc}", flush=True)
                     break  # the shared pool may hold a dead worker's task
+                except OSError as exc:
+                    # 서버 시작은(예: 포트 할당) 이미 TSan 경고를 수집한 뒤에도 실패할
+                    # 수 있어요. 아래 요약이 출력되게 해서 그 경고가 사라지지 않게 해요.
+                    failures.append(f"{s}: {exc}")
+                    print(f"  중단: {exc}", flush=True)
+                    break
     finally:
         if snapshot_dir:
             shutil.rmtree(snapshot_dir, ignore_errors=True)

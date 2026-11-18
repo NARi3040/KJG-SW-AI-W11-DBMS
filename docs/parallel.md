@@ -31,7 +31,7 @@
 - **느린 업로드를 `100 Continue` 뒤에 쉬는 이유:** 헤더 바로 뒤에 쉬면 클라이언트 16개가 대기열에 있는 동안 한꺼번에 쉬어요. 그러면 작업 스레드가 그 연결을 꺼낼 때는 본문이 이미 와 있어서 스레드 1개도 8개와 같은 처리량이 나와요(처음 시도에서 모두 157 req/s). `100 Continue`는 그 연결을 꺼낸 작업 스레드가 보내므로, 그 뒤에 쉬어야 스레드 하나가 실제로 묶여요.
 - 응답은 모두 내용까지 확인해요. 조회는 행 1개이고 `id`·`name = user<id>`·`age = id % 100`이 맞아야 하고, INSERT는 `ok: true`, `type: insert`, 정수 `id`여야 해요(정확성 검사와 재시작 뒤 INSERT도 같아요). 측정 구간이 끝난 뒤 도착한 응답도 검사해요. 처리량과 응답 시간에만 넣지 않아요.
 - 하나라도 틀리거나, HTTP 오류·연결 오류(응답 없이 닫힘, 잘린 응답 포함)가 있거나, 표본이 없는 실행이 있거나, 서버가 스크립트가 끄기 전에 스스로 종료됐거나, 서버 표준 오류를 읽지 못했거나, TSan 보고가 있으면 스크립트가 종료 코드 1이에요. 클라이언트 결과를 기한 안에 못 받으면(클라이언트 프로세스가 죽은 경우 등) 그 스위트를 실패로 적고 멈추되, 이미 남은 TSan 경고는 서버를 끈 뒤 읽어서 함께 보고해요.
-- TSan 경고는 서버를 끈 뒤 표준 오류 파일에서 세요. 셸에 `TSAN_OPTIONS=log_path=…`가 있으면 경고가 다른 파일로 가서 0건처럼 보이므로, 서버를 켤 때 다른 TSan 옵션은 그대로 두고 뒤에 `log_path=stderr`를 붙여요. 인자가 잘못되면(시간이 유한한 양수가 아님, `--inserts` 0 등) 시작 전에 종료 코드 2예요.
+- TSan 경고는 서버를 끈 뒤 표준 오류 파일에서 세요. 셸의 `TSAN_OPTIONS`가 경고를 다른 파일로 보내거나(`log_path=…`), 보고를 아예 끄면(`report_bugs=0`) 0건처럼 보이므로, 서버를 켤 때 다른 TSan 옵션은 그대로 두고 뒤에 `log_path=stderr report_bugs=1`을 붙여요. 시험 프로그램 실행도 같은 옵션을 강제해요(아래 실행 방법). 인자가 잘못되면(시간이 유한한 양수가 아님, `--inserts` 0 등) 시작 전에 종료 코드 2예요.
 - `--data`는 시작할 때 한 번 임시 복사본으로 고정해요. 모든 서버와 클라이언트의 id 범위가 그 복사본을 기준으로 해요.
 
 ## 2. 실행 방법
@@ -54,7 +54,7 @@ int main(void) { pthread_t a, b; pthread_create(&a, NULL, bump, NULL); pthread_c
   pthread_join(a, NULL); pthread_join(b, NULL); return 0; }
 EOF
 gcc -O1 -g -fsanitize=thread -pthread race.c -o race
-setarch "$(uname -m)" -R ./race 2>&1 | grep -c "WARNING: ThreadSanitizer"   # 1
+TSAN_OPTIONS='log_path=stderr report_bugs=1' setarch "$(uname -m)" -R ./race 2>&1 | grep -c "WARNING: ThreadSanitizer"   # 1
 
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -O1 -g -fsanitize=thread -pthread server.c parser.c execute.c storage.c bptree.c -o dbms_server_tsan
 printf '#!/bin/bash\nexec setarch "$(uname -m)" -R "%s/dbms_server_tsan" "$@"\n' "$PWD" > tsan_wrap.sh && chmod +x tsan_wrap.sh
