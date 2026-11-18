@@ -1,9 +1,11 @@
 /*
- * header_contract.c - dbms.h 계약 검사 (문법 검사 전용, 링크 불필요)
+ * header_contract.c - dbms.h·bptree.h 계약 검사 (문법 검사 전용, 링크 불필요)
  *
  * 포함 가드, 한도·배열 용량, 공개 타입 필드, 함수 시그니처를 확인해요.
  * 구현이 없으므로 실행하지 않고 -fsyntax-only로만 검사해요.
  */
+#include "bptree.h" /* 먼저 포함해 bptree.h 혼자 컴파일되는지도 봐요. */
+#include "bptree.h"
 #include "dbms.h"
 #include "dbms.h"
 
@@ -14,6 +16,7 @@ _Static_assert(DB_STRING_MAX == 255, "DB_STRING_MAX");
 _Static_assert(DB_VALUES_MAX == 16, "DB_VALUES_MAX");
 _Static_assert(PARSE_ERROR_SIZE == 128, "PARSE_ERROR_SIZE");
 _Static_assert(USERS_NAME_MAX == 64, "USERS_NAME_MAX");
+_Static_assert(BPTREE_ORDER == 512, "BPTREE_ORDER");
 
 /* ---------- 배열 용량 ---------- */
 
@@ -85,7 +88,14 @@ int main(void) {
     DbStatus (*storage_insert_fn)(Storage *, const char *, int64_t, InsertResult *) =
         storage_insert;
     DbStatus (*storage_scan_fn)(Storage *, RowHandler, void *, size_t *) = storage_scan;
+    DbStatus (*storage_find_by_id_fn)(Storage *, int64_t, RowHandler, void *, size_t *) =
+        storage_find_by_id;
     DbStatus (*storage_close_fn)(Storage *) = storage_close;
+    DbStatus (*bptree_create_fn)(BpTree **) = bptree_create;
+    void (*bptree_destroy_fn)(BpTree *) = bptree_destroy;
+    DbStatus (*bptree_insert_fn)(BpTree *, int64_t, uint64_t) = bptree_insert;
+    int (*bptree_find_fn)(const BpTree *, int64_t, uint64_t *) = bptree_find;
+    int (*bptree_check_fn)(const BpTree *) = bptree_check;
     RowHandler handler = sample_row_handler;
 
     (void)parse_next_fn;
@@ -93,7 +103,13 @@ int main(void) {
     (void)storage_open_fn;
     (void)storage_insert_fn;
     (void)storage_scan_fn;
+    (void)storage_find_by_id_fn;
     (void)storage_close_fn;
+    (void)bptree_create_fn;
+    (void)bptree_destroy_fn;
+    (void)bptree_insert_fn;
+    (void)bptree_find_fn;
+    (void)bptree_check_fn;
     (void)handler;
     return 0;
 }

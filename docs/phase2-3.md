@@ -3,7 +3,7 @@
 > **출처:** Notion "미니 DBMS Phase 2·3 계획과 안건" 페이지(2026-11-18 회의 결정 반영). 기준 코드는 `main` `4f1f862`예요.
 > **기준 문서:** [모듈 구성과 호출 계약](architecture.md) 7절, [저장 세부 설계](storage.md) 8.2·8.3절.
 > **회의 뒤 결정(2026-11-18, Notion에 없음):** 안건 1은 노도현이 정해요. 안건 9의 전역 뮤텍스는 서버가 `execute()` 호출을 감싸는 위치에 둬요([4.5절](#45-동시-접근-제어-안건-9-a)).
-> 이 문서는 회의에서 정한 것과 그에 따른 구현 계획을 적어요. 공개 함수 선언은 계약 PR에서 확정하며, [6장](#6-계약-pr-초안)은 초안이에요.
+> 이 문서는 회의에서 정한 것과 그에 따른 구현 계획을 적어요. 공개 함수 선언과 서버 구성은 #17에서 확정했어요([6장](#6-계약-17)).
 > **표시:** 측정값은 Notion 페이지의 실측(박준호 PC, Ryzen 7 5800X 8코어 16스레드, gcc 15.2.0, 데이터 파일은 tmpfs)이에요. 발표 수치는 시연 PC에서 다시 재요. "추론"이라고 적은 것은 결정에서 따라 나온 것이고 회의에서 따로 정하지 않았어요.
 
 ## 목차
@@ -13,7 +13,7 @@
 3. [Phase 2: B+ 트리 인덱스](#3-phase-2-b-트리-인덱스)
 4. [Phase 3: API 서버](#4-phase-3-api-서버)
 5. [참고 측정값](#5-참고-측정값)
-6. [계약 PR 초안](#6-계약-pr-초안)
+6. [계약 (#17)](#6-계약-17)
 7. [완료 기준](#7-완료-기준)
 8. [README "알려진 한계"에 적을 것](#8-readme-알려진-한계에-적을-것)
 9. [정하지 않은 것](#9-정하지-않은-것)
@@ -116,7 +116,7 @@ flowchart LR
 - ID 발급·행 쓰기·인덱스 갱신이 `storage_insert()` 한 함수 안에 있어 어긋나지 않아요. Phase 3에서는 서버가 `execute()` 호출 전체를 잠그므로 이 함수도 잠금 안에서 돌아요([4.5절](#45-동시-접근-제어-안건-9-a)).
 - 트리 자체는 `bptree.c` 독립 모듈이에요. 키·값 숫자만 알고 파일·SQL은 몰라요. 그래야 따로 테스트할 수 있어요.
 - [저장 설계 8.2절](storage.md#82-phase-2에서-낼-의견-위치로-한-행-읽기)의 "`row_index`로 한 행 읽기"는 저장 모듈 내부 함수로 써요.
-- 새 공개 함수는 "id로 한 행 찾기" 하나예요. 결과 전달은 `storage_scan()`과 같은 콜백 계약이에요([6장](#6-계약-pr-초안)).
+- 새 공개 함수는 "id로 한 행 찾기" 하나예요. 결과 전달은 `storage_scan()`과 같은 콜백 계약이에요([6장](#6-계약-17)).
 - **트리 넣기가 메모리 부족으로 실패할 때:** 트리 넣기는 헤더까지 쓴 뒤에 해요. 실패하면 `Storage`에 "인덱스 안 씀" 표시를 남기고, 그 뒤 id 조회는 전체 순회로 찾아요. INSERT는 성공으로 돌려줘요. 행은 이미 저장됐고 결과도 늘 맞아요.
 
 ```mermaid
@@ -196,7 +196,8 @@ flowchart TD
   - Windows: Winsock(`<winsock2.h>`). `WSAStartup` 초기화, 닫을 때 `closesocket`, `SOCKET` 자료형, `-lws2_32` 링크가 필요해요.
 - 스레드·뮤텍스·조건 변수는 `pthread`로 양쪽에서 같이 써요. `pthread`는 서버만 쓰고 CLI(`main.c`)와 저장 모듈은 쓰지 않아서, CLI와 기존 테스트 빌드 명령은 그대로예요. MinGW에서는 winpthreads로 컴파일되고, `-static`으로 빌드해야 `libwinpthread-1.dll` 없이 실행돼요.
 - Linux에서 `-std=c11`만 주면 `pthread_rwlock_t` 같은 일부 선언이 안 보여요. `#define _POSIX_C_SOURCE 200809L`을 둬요.
-- 스레드 수 기본값을 `sysconf(_SC_NPROCESSORS_ONLN)`으로 구하면 Windows에는 이 함수가 없어 따로 처리해야 해요(추론, 확인 안 됨).
+- ~~스레드 수 기본값을 `sysconf(_SC_NPROCESSORS_ONLN)`으로 구하면 Windows에는 이 함수가 없어 따로 처리해야 해요(추론, 확인 안 됨).~~
+  - #17: Windows는 `GetSystemInfo()`를 써요. x86_64-w64-mingw32-gcc 13에서 `-static -lws2_32`로 빌드되는 것을 확인했어요.
 
 ### 4.2 통신 방식 (안건 6: A)
 
@@ -209,7 +210,7 @@ flowchart TD
 
 - 요청 본문은 SQL 원문 그대로예요([4.2절](#42-통신-방식-안건-6-a)). JSON으로 감싸지 않아요. 요청의 `Content-Type`은 검사하지 않고, 응답은 `Content-Type: application/json`이에요(추론).
 - 응답은 JSON이에요. 문장별 결과 목록이고, 오류면 문장 번호와 메시지를 담아요.
-- 문장을 실행하기 전에 거절하는 경우(요청 줄·헤더 오류 400, 413, 503)도 같은 모양의 JSON 본문을 보내요(추론). `results`는 빈 배열이고 `error`에 `statement`는 넣지 않아요. `category`는 `request`, `message`는 차례로 `malformed request`, `body too large`, `server busy`예요. 예: `{"ok":false,"results":[],"error":{"category":"request","message":"server busy"}}`
+- 문장을 실행하기 전에 거절하는 경우(요청 줄·헤더 오류 400, 브라우저 요청 403, 413, 503)도 같은 모양의 JSON 본문을 보내요(추론). `results`는 빈 배열이고 `error`에 `statement`는 넣지 않아요. `category`는 `request`, `message`는 차례로 `malformed request`, `forbidden`, `body too large`, `server busy`예요. 예: `{"ok":false,"results":[],"error":{"category":"request","message":"server busy"}}`
 - 요청 하나에 문장 여러 개를 허용해요. 지금 파서처럼 첫 오류에서 멈춰요. 트랜잭션이 없어서 오류 앞 문장은 이미 저장됐고, 응답의 `results`에 그 결과가 남아요. 실패한 문장의 결과는 `results`에 넣지 않아요. SELECT가 중간에 실패하면(손상·읽기·콜백 오류) 그때까지 버퍼에 모은 행도 버려요.
 - JSON 이스케이프는 따옴표·역슬래시·제어 문자만 처리해요. UTF-8이 아닌 바이트는 다루지 않아요.
 - `category`와 `message`는 CLI와 같은 문자열을 써요. `main.c`의 `status_category()`·`status_cause()`는 `static`이라 서버에서 부를 수 없으므로, 두 함수를 `server.c`에 복사해요(추론). `main.c`와 `dbms.h`는 고치지 않아요.
@@ -220,6 +221,7 @@ flowchart TD
 | --- | --- |
 | 200 | 모든 문장 성공, `ok: true` |
 | 400 | 요청 줄·헤더 오류, `DB_ERR_SYNTAX`·`ARG`·`SCHEMA`·`TYPE`·`RANGE` |
+| 403 | `Origin` 헤더가 있거나 `Host`가 `127.0.0.1`·`localhost`와 포트가 아님([4.4절](#44-스레드-풀-안건-8-전부-a)) |
 | 413 | 본문이 1MiB 초과 |
 | 500 | `DB_ERR_NOMEM`·`IO`·`CORRUPT`·`OUTPUT`·`WRITE_UNCERTAIN` |
 | 503 | 대기열 가득 참 |
@@ -264,7 +266,7 @@ curl -s -X POST --data-binary "INSERT INTO users VALUES ('kim', 23); SELECT * FR
 | 항목 | 결정 |
 | --- | --- |
 | 스레드 수 | 고정. 실행 인자, 기본값은 CPU 코어 수. 측정에서 1·2·4·8로 바꿔 가며 비교 |
-| 대기열 크기 | 고정. 크기는 예시로 128을 들었고 따로 정하지 않음 |
+| 대기열 크기 | 고정. 실행 인자, 기본값 128(#17에서 정함) |
 | 가득 찼을 때 | 바로 503 응답 후 연결 닫기 |
 
 ```mermaid
@@ -282,7 +284,26 @@ flowchart LR
 ```
 
 - 갈래 C는 계약 PR 직후 가짜 `execute()`로 서버부터 만들 수 있어요.
-- 실행(초안, 합의 전): `./dbms_server [--port 8080] [--threads N] [--queue 128]`.
+- 서버 구성(#17에서 확정):
+  - 파일은 `server.c` 하나예요. HTTP 처리, 스레드 풀, JSON 응답, `main()`이 다 들어가요. 다른 모듈의 공개 함수는 `parse_next()`·`execute()`·`storage_open()`·`storage_close()`만 불러요.
+  - 실행 파일은 `dbms_server`이고, 데이터 파일은 CLI와 같은 현재 디렉터리의 `users.sans`예요.
+  - `127.0.0.1`에만 열어요. 인증이 없어서 다른 컴퓨터에서 접속하지 못하게 해요.
+  - 같은 컴퓨터의 브라우저가 열어 둔 다른 사이트가 `POST /query`를 보내는 것(CSRF)은 루프백만으로 막히지 않아요. 그래서 서버가 직접 거절해요(403, `message`는 `forbidden`).
+    - `Origin` 헤더가 있으면 거절해요. 브라우저는 POST에 `Origin`을 붙이고, `curl`·Python 클라이언트는 붙이지 않아요.
+    - `Host` 헤더가 있으면 `127.0.0.1:<포트>` 또는 `localhost:<포트>`일 때만 받아요. DNS 리바인딩으로 들어온 요청을 막아요.
+    - `Content-Type`은 검사하지 않아요. 본문이 SQL 원문이라 `application/json`을 요구할 수 없고, `text/plain` 같은 단순 요청은 위 두 검사로 막아요.
+  - 서버가 켜져 있는 동안 같은 `users.sans`를 CLI나 다른 서버가 함께 여는 것은 지원하지 않아요. 전역 뮤텍스는 서버 프로세스 안에서만 통하고, 각 프로세스가 `storage_open()`에서 다음 id를 따로 읽어서 같은 id가 두 번 쓰이면 파일이 손상으로 판정돼요. 프로세스 사이 잠금은 두지 않아요.
+  - 범위 밖이거나 정수가 아닌 값, 모르는 인자, 값 없는 인자는 표준 오류에 usage를 쓰고 종료 코드 1이에요(CLI와 같음). 저장소를 열기 전에 검사해요.
+  - 시작 실패(`storage_open()`, `WSAStartup`, `bind`·`listen`, 스레드 만들기)는 표준 오류에 한 줄을 쓰고 종료 코드 1이에요.
+  - Linux에서는 CLI처럼 `SIGPIPE`를 무시해요. 클라이언트가 먼저 끊어도 서버가 죽지 않아요.
+  - 빌드: Linux `gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread server.c parser.c execute.c storage.c bptree.c -o dbms_server`, Windows MinGW-w64는 끝에 `-static -lws2_32`를 더해요.
+  - 실행: `./dbms_server [--port P] [--threads N] [--queue Q]`
+
+| 인자 | 기본값 | 허용 범위 |
+| --- | --- | --- |
+| `--port` | 8080 | 1–65535 |
+| `--threads` | CPU 코어 수(Linux `sysconf(_SC_NPROCESSORS_ONLN)`, Windows `GetSystemInfo()`). 못 구하면 4, 256보다 많으면 256 | 1–256 |
+| `--queue` | 128 | 1–4096 |
 
 ### 4.5 동시 접근 제어 (안건 9: A)
 
@@ -362,9 +383,9 @@ Notion 페이지의 시제품(`bptree.c`, `storage_bench.c`, `conc_bench.c`, `sc
 | id 조회 | A. 뮤텍스 (채택) | 569,416 | 339,459 | 365,020 | 396,468 | 402,319 |
 | id 조회 | B. 읽기·쓰기 잠금 + `pread` | 687,217 | 1,622,707 | 2,749,255 | 3,712,210 | 3,936,825 |
 
-## 6. 계약 PR 초안
+## 6. 계약 (#17)
 
-결정을 반영한 초안이에요. 계약 PR에서 세 명이 확정해요.
+#17에서 확정했어요. 바꾸려면 세 명이 다시 합의해요. 선언과 주석은 [`bptree.h`](../bptree.h)와 [`dbms.h`](../dbms.h)의 `storage_find_by_id()`가 기준이고, 아래는 요약이에요. 검사는 `tests/header_contract.c`예요.
 
 ```c
 /* bptree.h */
@@ -389,7 +410,7 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 - Notion 초안에 있던 측정용 `storage_set_index_enabled()`와 CLI 환경 변수(`DBMS_TIMING`, `DBMS_NO_INDEX`)는 안건 5가 C로 정해져 넣지 않아요. 비교군 ②는 측정 프로그램이 `storage_scan()`으로 재요(추론).
 - `storage_open()`은 선언이 그대로예요. 재구축이 끝까지 가지 못할 때의 결과는 [3.3절](#33-인덱스를-만드는-시점-안건-11-a)대로예요.
 - 서버 파일 구성(`server.c`, 스레드 풀, HTTP 처리)과 실행 인자는 [4.4절](#44-스레드-풀-안건-8-전부-a)대로예요. 오류 `category`·`message`의 출처는 [4.3절](#43-요청응답-형식-안건-7-a)대로예요.
-- 계약 PR에서 [architecture.md 7절](architecture.md#7-세부-설계에서-확정할-사항)의 Phase 2·3 항목도 이 결정으로 채워요.
+- [architecture.md 7절](architecture.md#7-세부-설계에서-확정할-사항)의 Phase 2·3 항목도 이 결정으로 채웠어요.
 
 ## 7. 완료 기준
 
@@ -425,6 +446,7 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 
 - id가 순서대로 늘어서 반반 분할 후 왼쪽 노드는 반만 찬 채로 남아요. 100만 건에서는 문제없어요.
 - `name`에 UTF-8이 아닌 바이트가 있으면 JSON 응답이 올바른 UTF-8이 아닐 수 있어요.
+- 서버가 켜져 있는 동안 같은 `users.sans`를 CLI나 다른 서버로 함께 열면 안 돼요. 프로세스 사이 잠금이 없어 같은 id가 두 번 쓰일 수 있어요([4.4절](#44-스레드-풀-안건-8-전부-a)).
 - DB 부분은 전역 뮤텍스 하나라 SELECT끼리도 차례로 실행돼요. 100만 행 name 조회(약 70ms) 동안 다른 요청은 기다려요(안건 9에서 따라 나온 것, 추론).
 - 요청 수신 시간 제한이 없어 연결만 열고 멈춘 클라이언트가 작업 스레드 하나를 붙잡아요.
 - WHERE 없는 SELECT는 전체 행을 한 응답으로 보내요.
@@ -439,4 +461,4 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 | 안건 15. Notion 설계안과 레포 차이 정리 | 나중 안건, 내용 없음 |
 | 안건 2의 방식 | 둘 다 지원은 정했지만 호환 헤더(B)인지 완전 양쪽 처리(C)인지는 안 정함 |
 | 안건 10의 세부 | 노도현이 정함 |
-| Windows 스레드 수 기본값 | `sysconf`가 없어 대신할 방법을 정해야 할 수 있음(추론, 확인 안 됨) |
+| ~~Windows 스레드 수 기본값~~ | ~~`sysconf`가 없어 대신할 방법을 정해야 할 수 있음~~ → #17: `GetSystemInfo()`([4.1절](#41-지원-플랫폼-안건-2-둘-다)) |
