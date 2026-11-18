@@ -20,7 +20,7 @@ make test   # 파서 단위 테스트 (gcc 또는 MinGW-w64, C11)
 다음 명령으로 빌드하고 전체 테스트를 실행합니다.
 
 ```bash
-gcc -std=c11 -Wall -Wextra -Werror -pedantic main.c parser.c execute.c storage.c -o dbms
+gcc -std=c11 -Wall -Wextra -Werror -pedantic main.c parser.c execute.c storage.c bptree.c -o dbms
 python tests/run_tests.py
 ```
 

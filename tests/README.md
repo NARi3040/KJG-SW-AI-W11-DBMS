@@ -25,11 +25,12 @@ CLI·실행기 등 모듈별 실패 주입 테스트도 포함돼요. `test_harn
 - Python 3.10+ 표준 라이브러리만 사용
 - `gcc` (C11). `GCC`로 명령명이나 경로를 지정하고, 미지정 시 PATH의 `gcc`를 사용해요.
 - 통합 테스트는 `DBMS_EXE`로 실제 실행 파일을 받거나, 저장소 루트의
-  `main.c`·`parser.c`·`execute.c`·`storage.c`를 임시 디렉터리에서 빌드해요.
-- 단위 테스트는 각각 `parser.c`, `storage.c`, `execute.c`가 필요해요.
+  `main.c`·`parser.c`·`execute.c`·`storage.c`·`bptree.c`를 임시 디렉터리에서 빌드해요.
+- 단위 테스트는 각각 `parser.c`, `storage.c`(+`bptree.c`), `execute.c`가 필요해요.
   B+ 트리 테스트는 `bptree.c`가 필요해요.
 - `bptree_test.c`는 `BPTREE_TESTING`을 정의한 뒤 `bptree.c`를 직접 포함해요.
   그래서 러너는 `bptree.c`를 존재 확인용으로만 넣고 테스트 빌드에 따로 링크하지 않아요.
+  저장 테스트는 반대로 `storage.c`를 포함하거나 링크하면서 `bptree.c`를 같이 링크해요.
 - PR #13(CLI와 CLI 대역 테스트)·#14(실행기와 E01~E03)는 `main`에 병합되었고
   이 브랜치에도 반영됐어요. 병합 전 전체 러너가 누락 없이 통과해야 해요.
   해당 테스트를 중복 작성하거나 누락을 성공으로 처리하지 않아요.
@@ -85,7 +86,7 @@ gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . -fsyntax-only bptree.c
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . -DBPTREE_ORDER=4 -fsyntax-only bptree.c
 
 # 저장 테스트는 빈 임시 디렉터리를 cwd로 실행해야 해요 (상대 경로 users.sans)
-gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . storage.c tests/test_storage_contract.c -o storage_test
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . storage.c bptree.c tests/test_storage_contract.c -o storage_test
 tmp=$(mktemp -d) && (cd "$tmp" && /absolute/path/to/storage_test)
 
 # 통합 테스트: 소스가 있으면 자동 빌드, 없으면 DBMS_EXE 지정
