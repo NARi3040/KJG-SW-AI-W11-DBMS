@@ -4,6 +4,9 @@
  * 파일은 64바이트 헤더 뒤에 80바이트 고정 레코드가 이어져요. 정수는 모두
  * 리틀 엔디언으로 필드마다 직접 바꿔 써요. 레코드를 먼저 쓰고 헤더의
  * row_count를 나중에 고쳐서, 헤더가 "어디까지 저장됐는지"의 기준이 돼요.
+ *
+ * id 인덱스(B+ 트리, bptree.c)는 메모리에만 있어요. 열 때 파일 전체를 읽어
+ * 다시 만들고, INSERT가 헤더까지 쓴 뒤 넣어요(docs/phase2-3.md 3.1·3.3절).
  */
 
 /* 어떤 #include보다 먼저 둬요. Linux에서 fseeko·ftello·strnlen을 선언하고
@@ -13,6 +16,7 @@
 #define _FILE_OFFSET_BITS 64
 
 #include "dbms.h"
+#include "bptree.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -37,6 +41,8 @@ struct Storage {
     uint64_t row_count; /* 확정된 레코드 수. 파일 헤더와 같아요 */
     int64_t next_id;    /* 다음에 줄 ID */
     int broken;         /* 헤더 쓰기 결과를 모를 때 1 */
+    BpTree *index;      /* id → row_index. NULL이면 "인덱스 안 씀"이고 id 조회는
+                           전체 순회해요(재구축 중 손상, INSERT 때 메모리 부족) */
 };
 
 /* ---------- 바이트 변환 (파일을 건드리지 않는 순수 함수) ---------- */
@@ -244,6 +250,80 @@ static int write_counts(FILE *fp, uint64_t row_count, int64_t next_id) {
     return write_at(fp, 16, counts, sizeof(counts));
 }
 
+/* ---------- 레코드 순회와 인덱스 ---------- */
+
+/* 0번부터 total개 레코드를 묶음으로 읽어 검사한 행마다 on_row를 불러요.
+ * only_id가 1 이상이면 그 id인 행만 넘기고 첫 일치에서 멈춰요(인덱스를 못 쓸
+ * 때의 id 조회). *out_count는 on_row가 DB_OK를 돌려준 횟수예요. 묶음마다 위치를
+ * 다시 잡으므로 콜백이 파일 위치를 옮겨도 다음 묶음은 제자리에서 읽어요. */
+static DbStatus scan_records(Storage *storage, uint64_t total, int64_t only_id,
+                             RowHandler on_row, void *user_data,
+                             size_t *out_count) {
+    unsigned char buf[SCAN_BATCH * SANS_RECORD_SIZE];
+    uint64_t next = 0;
+
+    while (next < total) {
+        uint64_t left = total - next;
+        size_t batch = left < SCAN_BATCH ? (size_t)left : SCAN_BATCH;
+        size_t want = batch * SANS_RECORD_SIZE;
+
+        size_t got = read_at(storage->fp, record_offset(next), buf, want);
+        if (got == SIZE_MAX) {
+            return DB_ERR_IO;
+        }
+        if (got < want) {
+            return DB_ERR_CORRUPT; /* 파일이 중간에 줄었어요 */
+        }
+
+        for (size_t i = 0; i < batch; i++) {
+            Row row;
+            DbStatus status =
+                decode_record(buf + i * SANS_RECORD_SIZE, next + i, &row);
+            if (status != DB_OK) {
+                return status;
+            }
+            if (only_id > 0 && row.id != only_id) {
+                continue;
+            }
+            status = on_row(&row, user_data);
+            if (status != DB_OK) {
+                return status;
+            }
+            (*out_count)++;
+            if (only_id > 0) {
+                return DB_OK;
+            }
+        }
+        next += batch;
+    }
+    return DB_OK;
+}
+
+/* 재구축용 콜백: 검사를 통과한 행을 트리에 넣어요. 키는 오름차순이에요. */
+static DbStatus index_row(const Row *row, void *user_data) {
+    return bptree_insert(user_data, row->id, row->row_index);
+}
+
+/* 열기 마지막 단계(3.3절). DB_OK면 storage->index가 트리이거나, 레코드가
+ * 손상돼 NULL("인덱스 안 씀")이에요. 손상은 열기 실패가 아니고 scan이 알려요.
+ * 메모리 부족과 읽기 오류는 그대로 돌려줘요. */
+static DbStatus build_index(Storage *storage) {
+    BpTree *tree = NULL;
+    if (bptree_create(&tree) != DB_OK) {
+        return DB_ERR_NOMEM;
+    }
+
+    size_t count = 0;
+    DbStatus status = scan_records(storage, storage->row_count, 0, index_row,
+                                   tree, &count);
+    if (status == DB_OK) {
+        storage->index = tree;
+        return DB_OK;
+    }
+    bptree_destroy(tree);
+    return status == DB_ERR_CORRUPT ? DB_OK : status;
+}
+
 /* ---------- 공개 함수 ---------- */
 
 DbStatus storage_open(const char *path, Storage **out_storage) {
@@ -311,6 +391,14 @@ DbStatus storage_open(const char *path, Storage **out_storage) {
     storage->row_count = row_count;
     storage->next_id = next_id;
     storage->broken = 0;
+    storage->index = NULL;
+
+    status = build_index(storage);
+    if (status != DB_OK) {
+        fclose(fp);
+        free(storage);
+        return status;
+    }
     *out_storage = storage;
     return DB_OK;
 }
@@ -349,6 +437,15 @@ DbStatus storage_insert(Storage *storage, const char *name, int64_t age,
 
     storage->row_count = row_index + 1;
     storage->next_id = id + 1;
+
+    /* 6단계: 행은 이미 저장됐어요. 트리에 못 넣으면 인덱스를 버리고 이후 id
+     * 조회는 전체 순회로 찾아요. 결과는 늘 맞으므로 INSERT는 성공이에요. */
+    if (storage->index != NULL &&
+        bptree_insert(storage->index, id, row_index) != DB_OK) {
+        bptree_destroy(storage->index);
+        storage->index = NULL;
+    }
+
     out_result->id = id;
     out_result->row_index = row_index;
     return DB_OK;
@@ -362,40 +459,53 @@ DbStatus storage_scan(Storage *storage, RowHandler on_row, void *user_data,
         return DB_ERR_WRITE_UNCERTAIN;
     }
 
-    /* 시작할 때의 row_count까지만 읽어요. 묶음마다 위치를 다시 잡으므로
-     * 콜백이 파일 위치를 옮겨도 다음 묶음은 제자리에서 읽어요. */
-    const uint64_t total = storage->row_count;
-    unsigned char buf[SCAN_BATCH * SANS_RECORD_SIZE];
-    uint64_t next = 0;
+    /* 시작할 때의 row_count까지만 읽어요. */
+    return scan_records(storage, storage->row_count, 0, on_row, user_data,
+                        out_count);
+}
 
-    while (next < total) {
-        uint64_t left = total - next;
-        size_t batch = left < SCAN_BATCH ? (size_t)left : SCAN_BATCH;
-        size_t want = batch * SANS_RECORD_SIZE;
-
-        size_t got = read_at(storage->fp, record_offset(next), buf, want);
-        if (got == SIZE_MAX) {
-            return DB_ERR_IO;
-        }
-        if (got < want) {
-            return DB_ERR_CORRUPT; /* 파일이 중간에 줄었어요 */
-        }
-
-        for (size_t i = 0; i < batch; i++) {
-            Row row;
-            DbStatus status =
-                decode_record(buf + i * SANS_RECORD_SIZE, next + i, &row);
-            if (status != DB_OK) {
-                return status;
-            }
-            status = on_row(&row, user_data);
-            if (status != DB_OK) {
-                return status;
-            }
-            (*out_count)++;
-        }
-        next += batch;
+DbStatus storage_find_by_id(Storage *storage, int64_t id, RowHandler on_row,
+                            void *user_data, size_t *out_count) {
+    assert(storage != NULL && on_row != NULL && out_count != NULL);
+    *out_count = 0;
+    if (storage->broken) {
+        return DB_ERR_WRITE_UNCERTAIN;
     }
+    if (id < 1) {
+        return DB_OK;
+    }
+    if (storage->index == NULL) {
+        return scan_records(storage, storage->row_count, id, on_row, user_data,
+                            out_count);
+    }
+
+    uint64_t row_index = 0;
+    if (!bptree_find(storage->index, id, &row_index)) {
+        return DB_OK;
+    }
+    assert(row_index < storage->row_count);
+
+    unsigned char record[SANS_RECORD_SIZE];
+    size_t got = read_at(storage->fp, record_offset(row_index), record,
+                         sizeof(record));
+    if (got == SIZE_MAX) {
+        return DB_ERR_IO;
+    }
+    if (got < sizeof(record)) {
+        return DB_ERR_CORRUPT; /* 파일이 열린 뒤 줄었어요 */
+    }
+
+    Row row;
+    DbStatus status = decode_record(record, row_index, &row);
+    if (status != DB_OK) {
+        return status;
+    }
+    assert(row.id == id);
+    status = on_row(&row, user_data);
+    if (status != DB_OK) {
+        return status;
+    }
+    *out_count = 1;
     return DB_OK;
 }
 
@@ -405,6 +515,7 @@ DbStatus storage_close(Storage *storage) {
     }
     /* 실패해도 정리는 끝까지 하고, 다시 닫지 않아요. */
     DbStatus status = fclose(storage->fp) == 0 ? DB_OK : DB_ERR_IO;
+    bptree_destroy(storage->index);
     free(storage);
     return status;
 }

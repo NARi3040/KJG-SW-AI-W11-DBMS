@@ -1,10 +1,11 @@
 /*
- * storage_test.c - 저장 모듈 단위 테스트 (docs/storage.md 9장 T-1~T-29)
+ * storage_test.c - 저장 모듈 단위 테스트 (docs/storage.md 9장 T-1~T-34)
  *
- * T-23이 storage.c의 static 바이트 변환 함수를 직접 확인하므로 storage.c를
- * 이 파일에 포함해서 함께 컴파일해요. storage.c를 따로 링크하지 않아요.
+ * T-23이 storage.c의 static 바이트 변환 함수를, T-30~T-34가 Storage 필드를
+ * 직접 확인하므로 storage.c를 이 파일에 포함해서 함께 컴파일해요. storage.c를
+ * 따로 링크하지 않고, storage.c가 쓰는 bptree.c만 같이 링크해요.
  *
- *   gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I. -o storage_test tests/storage_test.c
+ *   gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I. -o storage_test tests/storage_test.c bptree.c
  *   ./storage_test [임시 파일을 만들 디렉터리]
  *
  * 디렉터리를 주지 않으면 현재 디렉터리에 storage_test_*.sans를 만들고 지워요.
@@ -573,6 +574,190 @@ static void t27_insert_during_scan(void) {
     remove(path);
 }
 
+/* ---------- id 인덱스 (docs/phase2-3.md 3.1·3.3절) ---------- */
+
+/* id 하나를 찾아 결과 상태를 돌려줘요. 찾은 행은 c에 복사돼요. */
+static DbStatus find_one(Storage *s, int64_t id, Collector *c, size_t *count) {
+    collector_init(c);
+    *count = 99; /* 0으로 바뀌는지 보려고 일부러 채워요 */
+    return storage_find_by_id(s, id, collect_row, c, count);
+}
+
+/* 1~n 전부와 없는 id들을 찾아, scan 결과와 같은지 확인해요. */
+static void check_find_matches_scan(Storage *s, int n) {
+    Collector all;
+    collector_init(&all);
+    size_t total = 0;
+    CHECK(storage_scan(s, collect_row, &all, &total) == DB_OK);
+    CHECK(total == (size_t)n);
+
+    for (int i = 0; i < n && i < MAX_ROWS; i++) {
+        Collector c;
+        size_t count = 0;
+        CHECK(find_one(s, i + 1, &c, &count) == DB_OK);
+        CHECK(count == 1 && c.n == 1);
+        if (c.n == 1) {
+            const Row *want = &all.rows[i];
+            CHECK(c.rows[0].id == want->id);
+            CHECK(c.rows[0].row_index == want->row_index);
+            CHECK(c.rows[0].age == want->age);
+            CHECK(strcmp(c.rows[0].name, want->name) == 0);
+        }
+    }
+
+    const int64_t absent[] = {0, -1, INT64_MIN, (int64_t)n + 1, INT64_MAX};
+    for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+        Collector c;
+        size_t count = 0;
+        CHECK(find_one(s, absent[i], &c, &count) == DB_OK);
+        CHECK(count == 0 && c.n == 0);
+    }
+}
+
+/* T-30: 다시 열면 트리를 재구축하고, 모든 id의 인덱스 결과가 scan과 같아요. */
+static void t30_rebuild_and_find(void) {
+    char path[PATH_SIZE];
+    make_path(path, "t30");
+    CHECK(make_rows(path, MAX_ROWS));
+
+    Storage *s = NULL;
+    REQUIRE(storage_open(path, &s) == DB_OK);
+    CHECK(s->index != NULL);
+    if (s->index != NULL) {
+        CHECK(bptree_check(s->index));
+    }
+    check_find_matches_scan(s, MAX_ROWS);
+    CHECK(storage_close(s) == DB_OK);
+    remove(path);
+
+    /* 빈 파일도 트리를 만들고, 어떤 id도 0행이에요. */
+    make_path(path, "t30e");
+    REQUIRE(storage_open(path, &s) == DB_OK);
+    CHECK(s->index != NULL);
+    check_find_matches_scan(s, 0);
+    CHECK(storage_close(s) == DB_OK);
+    remove(path);
+}
+
+/* T-31: 같은 Storage에서 INSERT한 행을 다시 열지 않고 바로 찾아요. */
+static void t31_insert_updates_index(void) {
+    char path[PATH_SIZE];
+    make_path(path, "t31");
+    CHECK(make_rows(path, 2));
+
+    Storage *s = NULL;
+    REQUIRE(storage_open(path, &s) == DB_OK);
+    InsertResult r;
+    CHECK(storage_insert(s, "New", 30, &r) == DB_OK);
+    CHECK(r.id == 3);
+
+    Collector c;
+    size_t count = 0;
+    CHECK(find_one(s, 3, &c, &count) == DB_OK);
+    CHECK(count == 1 && c.n == 1 && strcmp(c.rows[0].name, "New") == 0 &&
+          c.rows[0].age == 30 && c.rows[0].row_index == 2);
+    CHECK(find_one(s, 4, &c, &count) == DB_OK);
+    CHECK(count == 0);
+    check_find_matches_scan(s, 3);
+    CHECK(storage_close(s) == DB_OK);
+    remove(path);
+}
+
+/* T-32: "인덱스 안 씀"(INSERT 때 트리 넣기가 메모리 부족으로 실패한 뒤와 같은
+ * 상태)이면 전체 순회로 같은 결과를 내고, 그 뒤 INSERT도 성공해요. */
+static void t32_without_index(void) {
+    char path[PATH_SIZE];
+    make_path(path, "t32");
+    CHECK(make_rows(path, 129));
+
+    Storage *s = NULL;
+    REQUIRE(storage_open(path, &s) == DB_OK);
+    bptree_destroy(s->index); /* storage_insert의 메모리 부족 처리와 같아요 */
+    s->index = NULL;
+    check_find_matches_scan(s, 129);
+
+    InsertResult r;
+    CHECK(storage_insert(s, "Late", 7, &r) == DB_OK);
+    CHECK(r.id == 130 && s->index == NULL);
+    Collector c;
+    size_t count = 0;
+    CHECK(find_one(s, 130, &c, &count) == DB_OK);
+    CHECK(count == 1 && c.n == 1 && strcmp(c.rows[0].name, "Late") == 0);
+    CHECK(storage_close(s) == DB_OK);
+
+    /* 다시 열면 트리를 새로 만들어요. */
+    REQUIRE(storage_open(path, &s) == DB_OK);
+    CHECK(s->index != NULL);
+    check_find_matches_scan(s, 130);
+    CHECK(storage_close(s) == DB_OK);
+    remove(path);
+}
+
+/* T-33: 재구축 중 손상 레코드를 만나면 열기는 성공하고 인덱스를 쓰지 않아요.
+ * 손상 앞의 id는 찾고, 손상에 닿는 조회는 DB_ERR_CORRUPT예요. */
+static void t33_corrupt_record_at_open(void) {
+    char path[PATH_SIZE];
+    make_path(path, "t33");
+    CHECK(make_rows(path, 3));
+    unsigned char id[8];
+    put_u64le(id, 99);
+    CHECK(patch_file(path, 64 + 80, id, sizeof(id))); /* T-19와 같은 손상 */
+
+    Storage *s = NULL;
+    REQUIRE(storage_open(path, &s) == DB_OK);
+    CHECK(s->index == NULL);
+
+    Collector c;
+    size_t count = 0;
+    CHECK(find_one(s, 1, &c, &count) == DB_OK);
+    CHECK(count == 1 && c.n == 1 && c.rows[0].id == 1);
+    CHECK(find_one(s, 2, &c, &count) == DB_ERR_CORRUPT);
+    CHECK(count == 0 && c.n == 0);
+    CHECK(find_one(s, 3, &c, &count) == DB_ERR_CORRUPT);
+    CHECK(count == 0 && c.n == 0);
+    CHECK(find_one(s, 0, &c, &count) == DB_OK);
+    CHECK(count == 0);
+
+    collector_init(&c);
+    CHECK(storage_scan(s, collect_row, &c, &count) == DB_ERR_CORRUPT);
+    CHECK(count == 1);
+    CHECK(storage_close(s) == DB_OK);
+    remove(path);
+}
+
+/* T-34: 콜백 오류는 그대로 돌려주고 count = 0. 헤더 쓰기 결과를 모르는 상태면
+ * DB_ERR_WRITE_UNCERTAIN이에요. 인덱스를 쓸 때와 안 쓸 때 모두요. */
+static void t34_find_errors(void) {
+    char path[PATH_SIZE];
+    make_path(path, "t34");
+    CHECK(make_rows(path, 3));
+
+    Storage *s = NULL;
+    REQUIRE(storage_open(path, &s) == DB_OK);
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            bptree_destroy(s->index);
+            s->index = NULL;
+        }
+        Collector c;
+        collector_init(&c);
+        c.fail_at = 0;
+        size_t count = 99;
+        CHECK(storage_find_by_id(s, 2, collect_row, &c, &count) == DB_ERR_OUTPUT);
+        CHECK(count == 0);
+
+        s->broken = 1;
+        collector_init(&c);
+        count = 99;
+        CHECK(storage_find_by_id(s, 2, collect_row, &c, &count) ==
+              DB_ERR_WRITE_UNCERTAIN);
+        CHECK(count == 0 && c.n == 0);
+        s->broken = 0;
+    }
+    CHECK(storage_close(s) == DB_OK);
+    remove(path);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         temp_dir = argv[1];
@@ -596,6 +781,11 @@ int main(int argc, char **argv) {
     t23_byte_helpers();
     t24_t26_batches();
     t27_insert_during_scan();
+    t30_rebuild_and_find();
+    t31_insert_updates_index();
+    t32_without_index();
+    t33_corrupt_record_at_open();
+    t34_find_errors();
 
     printf("storage_test: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

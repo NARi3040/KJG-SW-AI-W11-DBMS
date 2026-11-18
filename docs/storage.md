@@ -1,7 +1,7 @@
 # 저장 세부 설계 (`storage.c` · 노도현)
 
 > **기준 문서:** [모듈 구성과 호출 계약](architecture.md)(큰 설계), [실행기](execute.md), [CLI](main.md), [테스트](test.md) 세부 설계.
-> 이 문서는 그중 저장 담당 부분만 자세히 적어요. **범위는 Phase 1**이고, Phase 2·3은 지금 형식이 막지 않도록 대비만 해요([8장](#8-phase-23-대비)). 구현 전 설계예요.
+> 이 문서는 그중 저장 담당 부분만 자세히 적어요. Phase 1 설계로 시작했고, Phase 2의 id 인덱스 연결(#19: 5.1절 7단계, 5.2절 7단계, 5.5절)을 더했어요. Phase 2·3의 결정은 [Phase 2·3 계획](phase2-3.md)이 기준이에요.
 > [2장](#2-큰-설계에-반영한-변경)의 S-1~S-4는 PR #1 합의 1번에서 **수용됐어요**. S-5(POSIX 입출력)는 받지 않고 합의 3번(Linux·Windows MinGW-w64, C 표준 입출력)으로 바뀌었어요.
 
 ## 목차
@@ -97,6 +97,8 @@ DbStatus storage_insert(Storage *storage, const char *name,
                         int64_t age, InsertResult *out_result);
 DbStatus storage_scan(Storage *storage, RowHandler on_row,
                       void *user_data, size_t *out_count);
+DbStatus storage_find_by_id(Storage *storage, int64_t id, RowHandler on_row,
+                            void *user_data, size_t *out_count);  // Phase 2 (#17)
 DbStatus storage_close(Storage *storage);
 ```
 
@@ -107,6 +109,7 @@ DbStatus storage_close(Storage *storage);
 | `name` | 입력 | `'\0'`으로 끝나는 문자열. 최대 `USERS_NAME_MAX` + 1바이트까지만 읽어요. 보관하지 않고 복사해요 |
 | `age` | 입력 | `int32_t` 범위여야 해요. 큰 설계 시그니처를 따라 `int64_t`로 받아요 |
 | `out_result` | 출력 | `DB_OK`일 때만 의미 있어요. 그 밖에는 0으로 채워요 |
+| `id` | 입력 | 찾을 `users.id`. 0·음수도 받고 결과는 0행이에요 |
 | `on_row`, `user_data` | 입력 | 행마다 `on_row(&row, user_data)`를 불러요 |
 | `out_count` | 출력 | 시작할 때 0으로 두고, 콜백이 `DB_OK`를 돌려줄 때마다 1씩 늘려요. 오류가 나도 그때까지의 값이 남아요 |
 
@@ -193,12 +196,14 @@ DbStatus storage_close(Storage *storage);
    - `64 + row_count × 80`이 `int64` 범위 안
    - 파일 크기 ≥ `64 + row_count × 80`
 5. 파일 크기가 `64 + row_count × 80`보다 크면 **뒤쪽 남는 바이트는 무시**해요. 레코드를 쓰고 헤더를 고치기 전에 프로그램이 죽은 흔적이에요. 그 행은 저장되지 않은 것이고, 다음 INSERT가 그 자리를 덮어써요.
-6. `Storage`를 `malloc`해서 `fp`, `row_count`, `next_id`를 채우고 `*out_storage`에 넣어요. `malloc` 실패는 `DB_ERR_NOMEM`이에요.
+6. `Storage`를 `malloc`해서 `fp`, `row_count`, `next_id`를 채워요. `malloc` 실패는 `DB_ERR_NOMEM`이에요.
+7. **인덱스 재구축(Phase 2):** 빈 트리를 만들고(`bptree_create`), 확정 레코드 `row_count`개를 5.3절과 같은 묶음 읽기·레코드 검사로 읽으며 `id → row_index`를 오름차순으로 넣어요. 다 넣으면 `Storage.index`에 두고 `*out_storage`에 넣어요([Phase 2·3 계획 3.3절](phase2-3.md#33-인덱스를-만드는-시점-안건-11-a)).
+   - 트리 만들기나 넣기의 메모리 부족: `DB_ERR_NOMEM`, `*out_storage = NULL`
+   - 읽기·위치 이동 실패: `DB_ERR_IO`, `*out_storage = NULL`
+   - 레코드 검사 실패나 파일이 중간에 줄어듦: **열기는 성공해요.** 만들던 트리를 버리고 `index = NULL`("인덱스 안 씀")로 둬요. 손상은 지금처럼 `storage_scan()`·`storage_find_by_id()`가 읽다가 `DB_ERR_CORRUPT`로 알려요. 열기에서 실패시키면 T-19·T-28·T-29(열기 성공 뒤 scan의 `count`가 1·1·2)가 깨져요.
 
-- 2~6 중 어디서 실패해도 연 파일은 `fclose()`로 닫고 할당한 메모리는 풀어요.
-- 레코드 내용은 열 때 검사하지 않아요. 100만 건이면 열 때마다 80MB를 읽게 돼서요. 레코드 검사는 `storage_scan()`이 읽으면서 해요.
-
-> **#17 결과(Phase 2):** 열 때 인덱스를 다시 만들려고 레코드를 모두 읽어요. 메모리 부족은 `DB_ERR_NOMEM`, 읽기 실패는 `DB_ERR_IO`이고 둘 다 `*out_storage`는 `NULL`이에요. 레코드 손상은 열기를 실패시키지 않고 "인덱스 안 씀" 표시만 남겨요. 손상은 지금처럼 `storage_scan()`이 알려요([Phase 2·3 계획 3.3절](phase2-3.md#33-인덱스를-만드는-시점-안건-11-a)). 아래 6장 표의 `storage_open()` 줄도 이에 맞춰 #19에서 고쳐요.
+- 2~7 중 어디서 실패해도 연 파일은 `fclose()`로 닫고 할당한 메모리(트리 포함)는 풀어요.
+- Phase 1에서는 열 때 레코드를 읽지 않았어요. Phase 2부터는 7단계 때문에 열 때마다 파일 전체(100만 건이면 80MB)를 한 번 읽어요. 이 비용은 #20 측정에서 따로 재요([Phase 2·3 계획 3.5절](phase2-3.md#35-성능-측정-안건-5-c)).
 
 ### 5.2 `storage_insert()`
 
@@ -211,8 +216,10 @@ DbStatus storage_close(Storage *storage);
 | 3 | `id = next_id`, `row_index = row_count`로 레코드 80바이트를 만들어요 | — | 변화 없음 |
 | 4 | 64비트 위치로 `64 + row_index × 80`에 이동해 레코드 80바이트를 `fwrite`하고 `fflush`해요 | `DB_ERR_IO` | 헤더가 그대로라 **저장되지 않은 것**이 확실해요. 다음 INSERT가 같은 자리를 덮어써요 |
 | 5 | 16번 위치로 이동해 새 `row_count`, `next_id` 16바이트를 `fwrite`하고 `fflush`해요 | `DB_ERR_WRITE_UNCERTAIN` | 헤더가 바뀌었는지 알 수 없어요. `broken = 1` |
-| 6 | 메모리의 `row_count`, `next_id`를 1씩 늘리고 `out_result`를 채워요 | — | 저장 완료 |
+| 6 | 메모리의 `row_count`, `next_id`를 1씩 늘려요 | — | 저장 완료 |
+| 7 | `index`가 있으면 트리에 `id → row_index`를 넣고, `out_result`를 채워요 | 트리를 버리고 `index = NULL`. **INSERT는 `DB_OK`** | 저장 완료 |
 
+- 7단계는 헤더까지 쓴 뒤라 행은 이미 저장됐어요. 트리 넣기가 메모리 부족으로 실패해도 INSERT를 실패로 돌려주지 않고, 이후 id 조회는 전체 순회로 찾아요(5.5절). 결과는 늘 맞고 느려지기만 해요. 다시 열면 트리를 새로 만들어요([Phase 2·3 계획 3.1절](phase2-3.md#31-인덱스-소유-안건-3-a)).
 - 4단계 실패가 확실한 실패인 이유: 파일을 다시 열면 헤더의 `row_count`만큼만 읽으니까, 반쯤 쓴 레코드는 없는 것과 같아요.
 - 5단계 실패 뒤에는 메모리의 `row_count`가 파일과 같은지 알 수 없어요. 그래서 `broken`을 켜고, 이후 `storage_insert()`와 `storage_scan()`은 파일을 건드리지 않고 `DB_ERR_WRITE_UNCERTAIN`을 돌려줘요. 할 수 있는 일은 `storage_close()`뿐이에요.
 - 5단계 실패 뒤 다시 열 때의 결과는 헤더가 어떻게 남았는지에 따라 달라요. **기존 행을 다시 읽을 수 있다고 보장하지 않아요.**
@@ -255,10 +262,24 @@ DbStatus storage_close(Storage *storage);
 
 1. `storage`가 NULL이면 `DB_OK`.
 2. `fclose(fp)`. 실패하면 결과는 `DB_ERR_IO`지만 **정리는 끝까지** 해요. 실패해도 다시 닫지 않아요.
-3. `free(storage)`. 이후 포인터는 무효예요.
+3. 트리를 `bptree_destroy()`로 풀어요(`NULL`이면 아무것도 안 해요).
+4. `free(storage)`. 이후 포인터는 무효예요.
 
 - 헤더는 INSERT마다 이미 쓰고 flush하므로 닫을 때 따로 쓰지 않아요. `fclose()`의 flush 반환값은 확인해요.
 - `broken`이어도 똑같이 닫아요.
+
+### 5.5 `storage_find_by_id()`
+
+Phase 2에서 #17로 추가한 공개 함수예요. `id`가 같은 행을 0개 또는 1개 `on_row`로 넘기고, 콜백 계약·반환값·`*out_count` 규칙은 5.3절 `storage_scan()`과 같아요.
+
+1. `*out_count = 0`. `broken`이면 `DB_ERR_WRITE_UNCERTAIN`.
+2. `id < 1`이면 `DB_OK`, 0행이에요. SQL의 `id < 1` 거절은 실행기가 해요.
+3. `index`가 있으면 트리에서 찾아요(`bptree_find`). 없으면 `DB_OK`, 0행이에요.
+4. 찾은 `row_index`의 레코드 80바이트를 `read_at`으로 읽고 5.3절 4단계와 같이 검사해요. 읽기 실패는 `DB_ERR_IO`, 다 못 읽었거나 검사에 걸리면 `DB_ERR_CORRUPT`예요.
+5. `on_row(&row, user_data)`를 불러요. `DB_OK`면 `*out_count = 1`, 아니면 그 값을 그대로 돌려줘요.
+
+- **인덱스를 못 쓸 때(`index = NULL`):** 3~5 대신 5.3절과 같은 묶음 읽기로 처음부터 순회하고, 첫 일치 행을 넘긴 뒤 멈춰요. 일치 행 앞에서 손상 레코드를 만나면 `DB_ERR_CORRUPT`예요. 재구축 중 손상을 만난 파일이면 손상 위치 앞의 id만 찾을 수 있어요(T-33).
+- 지금 형식은 `id == row_index + 1`이라 계산으로도 찾을 수 있지만, 트리를 거치는 것이 #17의 결정이에요([Phase 2·3 계획 7장 예상 질문](phase2-3.md#발표)).
 
 ## 6. 반환값과 오류
 
@@ -266,9 +287,10 @@ DbStatus storage_close(Storage *storage);
 | --- | --- | --- | --- | --- |
 | `storage_open()` | 성공 (기존 파일, 새 파일, 0바이트 파일) | `DB_OK` | 새 파일이면 헤더 64바이트 | 열린 상태 |
 | | 디렉터리 없음, 권한 없음, 읽기·위치 이동 실패 | `DB_ERR_IO` | 변화 없음 | `NULL` |
-| | `malloc` 실패 | `DB_ERR_NOMEM` | 새 파일이면 헤더만 있음 | `NULL` |
+| | `malloc` 실패, 인덱스 재구축 중 메모리 부족 | `DB_ERR_NOMEM` | 새 파일이면 헤더만 있음 | `NULL` |
+| | 인덱스 재구축 중 레코드 손상 | `DB_OK` ("인덱스 안 씀") | 변화 없음 | 열린 상태 |
 | | 크기 1~63바이트, 헤더 검사 실패, 파일이 `row_count`보다 짧음 | `DB_ERR_CORRUPT` | 변화 없음 | `NULL` |
-| `storage_insert()` | 성공 | `DB_OK` | 레코드 1개 추가, 헤더 갱신 | ID와 위치 |
+| `storage_insert()` | 성공 (트리 넣기가 메모리 부족이어도 "인덱스 안 씀"으로 성공) | `DB_OK` | 레코드 1개 추가, 헤더 갱신 | ID와 위치 |
 | | `name`이 64바이트 초과, `age`가 `int32` 밖, ID 소진 | `DB_ERR_RANGE` | 변화 없음 | 0 |
 | | 레코드 쓰기·flush 실패 | `DB_ERR_IO` | 저장 안 됨이 확실 | 0 |
 | | 헤더 쓰기·flush 실패, 또는 이미 `broken` | `DB_ERR_WRITE_UNCERTAIN` | 알 수 없음 | 0 |
@@ -276,6 +298,11 @@ DbStatus storage_close(Storage *storage);
 | | 읽기·위치 이동 실패 | `DB_ERR_IO` | 변화 없음 | 그때까지 성공 횟수 |
 | | 레코드 검사 실패, 파일이 중간에 줄어듦 | `DB_ERR_CORRUPT` | 변화 없음 | 그때까지 성공 횟수 |
 | | 콜백이 `DB_OK`가 아닌 값을 돌려줌 | 콜백의 반환값 | 변화 없음 | 그때까지 성공 횟수 |
+| | 이미 `broken` | `DB_ERR_WRITE_UNCERTAIN` | 변화 없음 | 0 |
+| `storage_find_by_id()` | 찾음, 못 찾음, `id < 1` | `DB_OK` | 변화 없음 | 1 또는 0 |
+| | 읽기·위치 이동 실패 | `DB_ERR_IO` | 변화 없음 | 0 |
+| | 읽은 레코드 검사 실패, 파일이 중간에 줄어듦 | `DB_ERR_CORRUPT` | 변화 없음 | 0 |
+| | 콜백이 `DB_OK`가 아닌 값을 돌려줌 | 콜백의 반환값 | 변화 없음 | 0 |
 | | 이미 `broken` | `DB_ERR_WRITE_UNCERTAIN` | 변화 없음 | 0 |
 | `storage_close()` | 성공, 또는 `NULL` | `DB_OK` | 닫힘 | — |
 | | `fclose` 실패 | `DB_ERR_IO` | 닫힘 (정리는 끝까지) | — |
@@ -294,6 +321,7 @@ DbStatus storage_close(Storage *storage);
 #include <stdio.h>   // FILE, fopen, fread, fwrite, fflush, fclose, fseeko / _fseeki64
 #include <string.h>  // strnlen, memcpy
 #include <errno.h>   // ENOENT
+#include "bptree.h"  // Phase 2: id 인덱스. 저장 모듈만 포함해요
 
 #define SANS_MAGIC        "SANS"
 #define SANS_VERSION      1
@@ -306,6 +334,7 @@ struct Storage {
     uint64_t row_count;   // 확정된 레코드 수. 파일 헤더와 같아요
     int64_t  next_id;     // 다음에 줄 ID
     int      broken;      // 헤더 쓰기 결과를 모를 때 1
+    BpTree  *index;       // Phase 2: id → row_index. NULL이면 "인덱스 안 씀"이고 id 조회는 전체 순회
 };
 
 static void     put_u16le(unsigned char *p, uint16_t v);
@@ -333,6 +362,11 @@ static DbStatus decode_record(const unsigned char in[SANS_RECORD_SIZE],
 static int      write_at(FILE *fp, uint64_t offset, const void *buf, size_t len);
 // seek64 → fread(len바이트). 위치 이동 실패나 ferror()면 SIZE_MAX, 아니면 읽은 바이트 수 (파일 끝이면 len보다 작음)
 static size_t   read_at(FILE *fp, uint64_t offset, void *buf, size_t len);
+// 5.3절의 묶음 읽기·검사. only_id ≥ 1이면 그 id만 넘기고 첫 일치에서 멈춰요 (scan, 인덱스 없는 id 조회, 재구축이 같이 써요)
+static DbStatus scan_records(Storage *storage, uint64_t total, int64_t only_id,
+                             RowHandler on_row, void *user_data, size_t *out_count);
+// 5.1절 7단계. 손상이면 DB_OK에 index = NULL
+static DbStatus build_index(Storage *storage);
 ```
 
 - 바이트 변환(`put_*`, `get_*`, `encode_*`, `decode_*`)은 파일을 건드리지 않는 순수 함수예요. 파일 없이 단위 테스트할 수 있어요.
@@ -385,10 +419,10 @@ DbStatus storage_fetch(Storage *storage, uint64_t row_index,
 
 ## 9. 테스트
 
-`tests/storage_test.c`에서 저장 함수를 직접 불러 확인해요. T-23이 `static` 바이트 변환 함수를 직접 부르므로, 테스트 파일이 `storage.c`를 포함해 함께 컴파일해요(`storage.c`를 따로 링크하지 않아요). 파일은 테스트마다 임시 경로에 새로 만들고 끝나면 지워요. 콜백은 받은 행을 배열에 복사해 두는 테스트용 함수를 써요.
+`tests/storage_test.c`에서 저장 함수를 직접 불러 확인해요. T-23이 `static` 바이트 변환 함수를, T-30~T-34가 `Storage` 필드를 직접 보므로, 테스트 파일이 `storage.c`를 포함해 함께 컴파일해요(`storage.c`를 따로 링크하지 않고, `storage.c`가 쓰는 `bptree.c`만 같이 링크해요). 파일은 테스트마다 임시 경로에 새로 만들고 끝나면 지워요. 콜백은 받은 행을 배열에 복사해 두는 테스트용 함수를 써요.
 
 ```sh
-gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I. -o storage_test tests/storage_test.c
+gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I. -o storage_test tests/storage_test.c bptree.c
 ./storage_test [임시 파일 디렉터리]   # 생략하면 현재 디렉터리
 ```
 
@@ -423,7 +457,14 @@ gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I. -o storage_test tests/storage_
 | T-27 | 129건 저장 후, 콜백이 행마다 같은 `Storage`에 INSERT하며 scan (계약 위반) | scan은 `DB_OK`, `count = 129`, 마지막 행 `id = 129`. 다시 열어 scan하면 258건 (5.3절: 묶음마다 위치를 다시 잡음) |
 | T-28 | 3건 저장 후 2번째 레코드의 이름 뒤 패딩, 1번째 레코드의 예약 바이트를 각각 0이 아닌 값으로 바꿈 | 각각 scan이 `DB_ERR_CORRUPT`, `count = 1`과 `count = 0` |
 | T-29 | 3건 저장 후 3번째 레코드의 이름 안 한 바이트를 0으로 바꿈 | scan이 `DB_ERR_CORRUPT`, `count = 2` |
+| T-30 | 200건 저장 → 다시 열기 → id 1~200과 0·-1·`INT64_MIN`·201·`INT64_MAX`로 `storage_find_by_id()`. 빈 파일도 같은 검사 | `index`가 있고 `bptree_check()` 통과. 있는 id는 `count = 1`이고 scan의 같은 행과 모든 필드가 같음. 없는 id는 `DB_OK`, `count = 0`, 콜백 0번 |
+| T-31 | 2건 저장 파일을 열고 1건 INSERT 뒤, 닫지 않고 새 id 찾기 | 새 행을 찾음(`row_index = 2`). 다음 id는 0행 |
+| T-32 | 129건 파일을 열고 트리를 버려 "인덱스 안 씀"으로 만든 뒤 T-30과 같은 비교, 1건 INSERT 후 새 id 찾기, 다시 열기 | 결과가 인덱스 있을 때와 같음. INSERT는 `DB_OK`이고 `index`는 그대로 `NULL`. 다시 열면 트리가 다시 생김 |
+| T-33 | T-19처럼 2번째 레코드의 `id`를 99로 바꾼 파일 열기 | 열기 `DB_OK`, `index = NULL`. id 1은 찾고, id 2·3은 `DB_ERR_CORRUPT`, `count = 0`. scan은 T-19와 같음 |
+| T-34 | 3건 파일에서 인덱스 있을 때와 없을 때 각각: 콜백이 첫 행에서 오류, `broken = 1` | 콜백 오류 그대로·`count = 0`, `broken`이면 `DB_ERR_WRITE_UNCERTAIN`·`count = 0` |
 
+- 트리의 메모리 부족은 `bptree.h`에 할당 훅을 두지 않기로 해서(#17) 일부러 만들지 않아요. T-32는 메모리 부족 처리가 남기는 상태(`index = NULL`)를 직접 만들어 그 뒤 동작을 확인해요. 재구축 중 메모리 부족(`DB_ERR_NOMEM`)은 코드 리뷰로 확인해요.
+- 인덱스 결과와 선형 결과가 같은지는 SQL 통합 테스트 `test_19_id_index_matches_full_scan_after_restart`(2,000건, 다시 켠 뒤 무작위 id 200개와 없는 id)에서도 봐요.
 - 헤더 쓰기 실패(`DB_ERR_WRITE_UNCERTAIN`)는 일반 파일로 일부러 만들기 어려워요. 단위 테스트에서는 다루지 않고 코드 리뷰로 확인해요(10장). [테스트 설계](test.md#1-범위와-준비)도 실패 주입을 이번 범위에서 뺐어요.
 - [테스트 설계 3장](test.md#3-최소-단위-테스트)의 S01은 T-2·T-4, S02는 T-5와 같은 내용이에요. 이 표가 기대값을 더 자세히 적은 것이라, 구현할 때는 한 파일에 합쳐요.
 - SQL 파일 테스트(01~18)는 최무헌 님 담당이에요. 그쪽에서 이 표의 동작에 기대는 곳은 02.sql(재시작 후 데이터와 ID 보존)과 14~16.sql(이름 64·65바이트, age `int32` 경계)이에요. 14~16.sql은 실행기가 먼저 거르지만, 저장 모듈도 같은 기준으로 다시 검사해요(T-6·T-7·T-10·T-11).
