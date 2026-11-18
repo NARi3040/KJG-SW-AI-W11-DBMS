@@ -231,7 +231,10 @@ static int close_ok(Storage *s, const char *when) {
 static int prepare(const char *path, uint64_t rows) {
     FILE *probe = fopen(path, "rb");
     if (probe != NULL) {
-        fclose(probe);
+        if (fclose(probe) != 0) {
+            fprintf(stderr, "파일 확인용 스트림 닫기 실패\n");
+            return 0;
+        }
         Storage *s = NULL;
         DbStatus st = storage_open(path, &s);
         if (st != DB_OK) {
@@ -386,6 +389,11 @@ int main(int argc, char **argv) {
     DbStatus st = storage_open(path, &s);
     if (st != DB_OK || s->index == NULL) {
         fprintf(stderr, "열기 실패 또는 인덱스 없음: %s\n", status_name(st));
+        goto done;
+    }
+    if (s->row_count != rows) {
+        fprintf(stderr, "조회용으로 다시 연 파일의 행 수 %" PRIu64 " != 요청 %" PRIu64 "\n",
+                s->row_count, rows);
         goto done;
     }
 
