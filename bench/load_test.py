@@ -152,8 +152,9 @@ class Server:
             failures.append(f"{label}: server exited on its own "
                             f"(code {self.proc.returncode}) before it was stopped")
         # 위 poll()과 아래 kill() 사이에 터진 크래시는 self.proc에 실제 종료 코드를
-        # 남기지만 여기서는 실패로 기록되지 않아요. 창이 밀리초 미만이라 kill()에서
-        # 신호 코드(-SIGKILL 대 -SIGSEGV)를 구분하는 책킵 대신 수용해요.
+        # 남기지만 여기서는 실패로 기록되지 않아요. 창이 밀리초 미만이라, kill() 뒤에
+        # returncode가 의도한 -SIGKILL인지 검사해 크래시(-SIGSEGV 등)를 가려내는
+        # 코드를 넣는 대신 그대로 둬요.
         self.kill()
 
     def tsan_reports(self, failures, label):
