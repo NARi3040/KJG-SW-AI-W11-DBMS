@@ -32,15 +32,25 @@ flowchart LR
 
 시연은 Phase 1 CLI로 해요. 인덱스와 서버는 3·4장의 측정 결과로 보여 줘요.
 
-**준비 (발표 전).** Linux나 Git Bash 기준이에요. `build/`는 git이 무시하는 폴더예요.
+**준비 (발표 전).** 저장소 루트에서 실행해요. 마지막 줄은 리허설로 생긴 데이터를 지우고 빈 테이블에서 시작하려는 거예요. `build/`는 git이 무시하는 폴더예요.
+
+Linux·Git Bash:
 
 ```bash
 mkdir -p build/cli
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -O2 main.c parser.c execute.c storage.c bptree.c -o build/dbms
-rm -f build/cli/users.sans   # 리허설로 생긴 데이터를 지우고 빈 테이블에서 시작
+rm -f build/cli/users.sans
 ```
 
-CLI는 현재 폴더의 `users.sans`를 열고, 없으면 새로 만들어요.
+Windows PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force build\cli | Out-Null
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -O2 main.c parser.c execute.c storage.c bptree.c -o build/dbms
+Remove-Item build\cli\users.sans -Force -ErrorAction Ignore
+```
+
+CLI는 현재 폴더의 `users.sans`를 열고, 없으면 새로 만들어요. ①②의 명령은 PowerShell에서도 그대로 돼요.
 
 ① [`demo/phase1.sql`](demo/phase1.sql)을 보여 주고 실행해요. INSERT마다 자동 id가 나오고, SELECT는 `id<TAB>name<TAB>age` 줄과 행 수를 출력해요.
 
