@@ -46,7 +46,7 @@ typedef int Socket;
 #define BODY_MAX ((size_t)1 << 20)    /* 1 MiB */
 #define HEADER_MAX 8192               /* 요청 줄과 헤더를 합친 최대 바이트 */
 #define DRAIN_MAX (BODY_MAX * 4)      /* 거절한 요청에서 읽고 버릴 최대 바이트 */
-#define DRAIN_TIMEOUT_MS 1000         /* 버리며 읽을 때 한 번 기다리는 최대 시간 */
+#define DRAIN_TIMEOUT_MS 1000         /* 버리며 읽기 전체에 쓸 최대 시간 */
 #define REJECT_MAX 64                 /* 503을 보내려고 기다릴 수 있는 연결 수 */
 
 #define NOMEM_BODY "{\"ok\":false,\"results\":[],\"error\":{\"category\":\"memory\"," \
@@ -412,15 +412,29 @@ static void set_receive_timeout(Socket socket, int milliseconds) {
     setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
 }
 
-/* 읽지 않은 본문이 남은 채 닫으면 RST로 응답이 사라질 수 있어 조금 읽고 버려요. */
+static uint64_t monotonic_ms(void) {
+#ifdef _WIN32
+    return (uint64_t)GetTickCount64();
+#else
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+#endif
+}
+
+/* 읽지 않은 본문이 남은 채 닫으면 RST로 응답이 사라질 수 있어 조금 읽고 버려요.
+ * 조금씩 보내는 클라이언트가 스레드를 붙잡지 않게 전체 시간도 제한해요(최대 약 2배). */
 static void drain_and_close(Socket socket) {
     char scrap[4096];
     size_t drained = 0;
     long received;
+    uint64_t deadline = monotonic_ms() + DRAIN_TIMEOUT_MS;
 
     shutdown(socket, SOCKET_SHUT_WRITE);
     set_receive_timeout(socket, DRAIN_TIMEOUT_MS);
-    while (drained < DRAIN_MAX && (received = socket_recv(socket, scrap, sizeof scrap)) > 0) {
+    while (drained < DRAIN_MAX && monotonic_ms() < deadline &&
+           (received = socket_recv(socket, scrap, sizeof scrap)) > 0) {
         drained += (size_t)received;
     }
     socket_close(socket);
