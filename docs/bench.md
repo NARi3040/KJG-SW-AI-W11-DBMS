@@ -39,8 +39,9 @@ gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -I. -pthread bench/index_bench
 ./index_bench bench.sans 1000000 1000 20 0   # ② 빼기 (조회 1,000개에 약 1분 줄어요)
 ```
 
-- 인자: `<파일> [행 수=1000000] [조회 수=1000] [시드=20] [②=1|0]`
-- 파일이 없으면 행 수만큼 INSERT해서 만들고 삽입 시간도 출력해요. 있으면 행 수가 같은지만 보고 그대로 써요. 다른 행 수로 재려면 파일을 지워요.
+- 인자: `<파일> [행 수=1000000] [조회 수=1000] [시드=20] [②=1|0]`. 행 수는 1 이상, 조회 수는 1~1,000,000, ②는 `0`이나 `1`만 받아요. 숫자가 아니거나 범위 밖이면 측정하지 않고 종료 코드 2예요.
+- 파일이 없으면 행 수만큼 INSERT해서 만들고 삽입 시간도 출력해요. 있으면 행 수가 같고 이 프로그램이 만든 형식(id i의 이름 `user<i>`, 나이 `i % 100`)인지 시간 밖에서 확인한 뒤 그대로 써요. 어긋나면 종료 코드 1이에요. 다른 행 수로 재려면 파일을 지워요.
+- 열기·닫기 실패, 시간 읽기 실패, 표준 출력 쓰기 실패도 종료 코드 1이에요.
 - `-pthread`는 MinGW-w64에서 `clock_gettime`이 winpthreads에 있어서 필요해요. Linux에서는 영향이 없어요(3.5절).
 - `python tests/run_tests.py`는 2,000행·조회 50개로 짧게 돌려(`index_bench_smoke`) 빌드와 결과 일치만 확인해요. 100만 행 측정은 손으로 돌려요.
 
@@ -86,12 +87,28 @@ gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -I. -pthread bench/index_bench
 - ①의 최소·최대는 Linux 2.48µs·121µs, Windows 3.7µs·95.3µs예요. 드물게 튀는 값 때문에 평균이 중앙값보다 조금 커요.
 - 중앙값 기준으로 ①은 ③보다 Linux에서 약 10,900배, Windows에서 약 9,100배 빨라요.
 - ②와 ③은 둘 다 파일 전체를 읽어서 거의 같아요. 같은 열(id)끼리 비교해도 차이는 인덱스에서 나와요.
+- 조회마다 ① → ② → ③ 순서로 재요. ③이 ② 바로 뒤라 덕을 보는지 보려고 같은 파일·시드로 ②를 켜고 끈 실행을 이어서 비교했어요(Linux). ③ 중앙값이 ② 켬 43.33ms, ② 끔(① → ③) 43.87ms라 순서 효과는 측정 흔들림 안이에요. 파일 전체가 이미 페이지 캐시에 있어서로 봐요(3장, 추론).
 - 열기 ≈ 전체 순회 + 트리만 만들기예요(Linux 41.8 + 29.8 = 71.6ms, Windows 63.9 + 28.9 = 92.8ms). 트리 비용은 두 환경이 같고, 차이는 파일 읽기에서 나요.
 - 원본 출력은 [부록](#부록-원본-출력)에 있어요.
 
 ## 5. CLI 한 번 실행 비용
 
-시연에서는 CLI로 SQL 파일을 돌리므로, 같은 100만 행 파일(`users.sans`)로 문장 하나짜리 SQL 파일을 실행해 프로세스 시작부터 끝까지 재 봤어요. Linux, `-O2`로 빌드한 `dbms`, 7번씩 잰 값이에요.
+시연에서는 CLI로 SQL 파일을 돌리므로, 같은 100만 행 파일로 문장 하나짜리 SQL 파일을 실행해 프로세스 시작부터 끝까지 재 봤어요. Linux, `-O2`로 빌드한 `dbms`, 7번씩 잰 값이에요.
+
+CLI는 현재 디렉터리의 `users.sans`만 열어요. 그래서 빈 작업 디렉터리를 만들고 측정 파일을 `users.sans`로 두고 재요.
+
+```bash
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -O2 main.c parser.c execute.c storage.c bptree.c -o dbms
+mkdir cli_bench && cd cli_bench
+../index_bench users.sans 1000000 10 20 0 > /dev/null   # 측정용 100만 행을 users.sans로 만들기
+echo "SELECT * FROM users WHERE id = 777777;" > id.sql
+echo "SELECT * FROM users WHERE name = 'user777777';" > name.sql
+: > empty.sql
+../dbms id.sql && ../dbms name.sql    # 둘 다 "777777	user777777	77"과 "SELECT OK rows=1"인지 먼저 확인
+for f in empty id name; do for i in 1 2 3 4 5 6 7; do
+  s=$(date +%s%N); ../dbms $f.sql > /dev/null; e=$(date +%s%N); echo "$f $(( (e - s) / 1000000 ))ms"
+done; done
+```
 
 | SQL 파일 | 7번 (ms) | 중앙값 |
 | --- | --- | --- |

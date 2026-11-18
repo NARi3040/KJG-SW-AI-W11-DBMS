@@ -16,9 +16,10 @@
  *       bench/index_bench.c -o index_bench
  *   ./index_bench bench.sans [행 수=1000000] [조회 수=1000] [시드=20] [②=1|0]
  *
- * 파일이 없으면 행 수만큼 INSERT해서 만들고(삽입 시간도 출력), 있으면 행 수가
- * 같은지 확인한 뒤 그대로 써요. -pthread는 MinGW-w64의 clock_gettime(winpthreads)
- * 때문이고 Linux에서는 영향이 없어요.
+ * 파일이 없으면 행 수만큼 INSERT해서 만들고(삽입 시간도 출력), 있으면 이 프로그램이
+ * 만든 형식(id i의 이름이 user<i>, 나이 i % 100)인지 확인한 뒤 그대로 써요.
+ * -pthread는 MinGW-w64의 clock_gettime(winpthreads) 때문이고 Linux에서는 영향이
+ * 없어요. 측정 도중 오류가 나면 표를 내지 않고 종료 코드 1이에요.
  */
 #include "../storage.c"
 #include "../bptree.c"
@@ -28,12 +29,17 @@
 
 #define OPEN_REPEAT 5
 #define ABSENT_COUNT 4
+#define MAX_QUERIES 1000000u /* 조회 배열 4개를 합쳐 32MB 이하 */
 
 /* ---------- 시간과 통계 ---------- */
 
+/* 시간을 못 읽으면 측정값을 믿을 수 없어서 바로 끝내요. */
 static uint64_t now_ns(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        fprintf(stderr, "clock_gettime 실패\n");
+        exit(1);
+    }
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
@@ -99,6 +105,24 @@ static uint64_t next_random(uint64_t *state) {
     return z ^ (z >> 31);
 }
 
+/* ---------- 인자 ---------- */
+
+/* 10진수 전체가 [lo, hi] 안의 숫자일 때만 1이에요. 부호, 빈 문자열, 뒤에 붙은
+ * 글자, 범위 초과는 거절해요(strtoull은 "-1"과 "12x"를 받아들여서요). */
+static int parse_u64(const char *text, uint64_t lo, uint64_t hi, uint64_t *out) {
+    if (text[0] < '0' || text[0] > '9') {
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(text, &end, 10);
+    if (errno != 0 || *end != '\0' || v < lo || v > hi) {
+        return 0;
+    }
+    *out = (uint64_t)v;
+    return 1;
+}
+
 /* ---------- 콜백 ---------- */
 
 typedef struct {
@@ -137,6 +161,20 @@ static DbStatus ignore_row(const Row *row, void *user_data) {
     (void)row;
     (void)user_data;
     return DB_OK;
+}
+
+static void make_name(char *out, size_t cap, int64_t id) {
+    snprintf(out, cap, "user%" PRId64, id);
+}
+
+/* 재사용 파일 검사: prepare()가 만든 형식이 아니면 첫 행에서 멈춰요. */
+static DbStatus check_bench_row(const Row *row, void *user_data) {
+    (void)user_data;
+    char name[32];
+    make_name(name, sizeof(name), row->id);
+    return strcmp(row->name, name) == 0 && row->age == (int32_t)(row->id % 100)
+               ? DB_OK
+               : DB_ERR_SCHEMA;
 }
 
 static int same_row(const Row *a, const Row *b) {
@@ -178,11 +216,17 @@ static const char *status_name(DbStatus s) {
     return (unsigned)s < sizeof(names) / sizeof(names[0]) ? names[s] : "?";
 }
 
-static void make_name(char *out, size_t cap, int64_t id) {
-    snprintf(out, cap, "user%" PRId64, id);
+/* 닫기 실패(DB_ERR_IO)도 측정 실패로 봐요. 핸들은 성공·실패 모두 해제돼요. */
+static int close_ok(Storage *s, const char *when) {
+    DbStatus st = storage_close(s);
+    if (st != DB_OK) {
+        fprintf(stderr, "%s 닫기 실패: %s\n", when, status_name(st));
+        return 0;
+    }
+    return 1;
 }
 
-/* 파일이 없으면 rows건을 넣어 만들고, 있으면 행 수를 확인해요. 실패하면 0. */
+/* 파일이 있으면 행 수와 형식을 확인하고, 없으면 rows건을 넣어 만들어요. 실패하면 0. */
 static int prepare(const char *path, uint64_t rows) {
     FILE *probe = fopen(path, "rb");
     if (probe != NULL) {
@@ -193,15 +237,26 @@ static int prepare(const char *path, uint64_t rows) {
             fprintf(stderr, "기존 파일 열기 실패: %s\n", status_name(st));
             return 0;
         }
-        uint64_t have = s->row_count;
-        storage_close(s);
-        if (have != rows) {
+        if (s->row_count != rows) {
             fprintf(stderr, "기존 파일 행 수 %" PRIu64 " != 요청 %" PRIu64
                             ". 파일을 지우고 다시 실행하세요\n",
-                    have, rows);
+                    s->row_count, rows);
+            close_ok(s, "기존 파일");
             return 0;
         }
-        printf("데이터: 기존 파일 재사용 (%" PRIu64 "행)\n", rows);
+        size_t count = 0;
+        st = storage_scan(s, check_bench_row, NULL, &count);
+        if (st != DB_OK) {
+            fprintf(stderr, "기존 파일이 측정용 형식(이름 user<id>, 나이 id %% 100)이 "
+                            "아니에요(%s, %zu행째). 새 경로로 다시 실행하세요\n",
+                    status_name(st), count + 1);
+            close_ok(s, "기존 파일");
+            return 0;
+        }
+        if (!close_ok(s, "기존 파일")) {
+            return 0;
+        }
+        printf("데이터: 기존 파일 재사용 (%" PRIu64 "행, 형식 확인함)\n", rows);
         return 1;
     }
 
@@ -209,6 +264,14 @@ static int prepare(const char *path, uint64_t rows) {
     DbStatus st = storage_open(path, &s);
     if (st != DB_OK) {
         fprintf(stderr, "새 파일 만들기 실패: %s\n", status_name(st));
+        return 0;
+    }
+    /* 존재 확인과 열기 사이에 다른 프로세스가 만든 파일이면 건드리지 않아요. */
+    if (s->row_count != 0) {
+        fprintf(stderr, "새 파일이어야 하는데 이미 %" PRIu64 "행이 있어요. "
+                        "INSERT하지 않고 끝내요\n",
+                s->row_count);
+        close_ok(s, "새 파일");
         return 0;
     }
     uint64_t start = now_ns();
@@ -219,12 +282,14 @@ static int prepare(const char *path, uint64_t rows) {
         st = storage_insert(s, name, (int64_t)(i % 100), &r);
         if (st != DB_OK || r.id != (int64_t)i) {
             fprintf(stderr, "INSERT %" PRIu64 " 실패: %s\n", i, status_name(st));
-            storage_close(s);
+            close_ok(s, "새 파일");
             return 0;
         }
     }
     uint64_t elapsed = now_ns() - start;
-    storage_close(s);
+    if (!close_ok(s, "새 파일")) {
+        return 0;
+    }
     char t[32];
     fmt_time(t, sizeof(t), (double)elapsed);
     printf("데이터: %" PRIu64 "행 INSERT %s (행당 %.2fus, INSERT마다 레코드·헤더 flush)\n",
@@ -240,14 +305,27 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *path = argv[1];
-    uint64_t rows = argc > 2 ? strtoull(argv[2], NULL, 10) : 1000000u;
-    size_t queries = argc > 3 ? (size_t)strtoull(argv[3], NULL, 10) : 1000u;
-    uint64_t seed = argc > 4 ? strtoull(argv[4], NULL, 10) : 20u;
-    int run_linear_id = argc > 5 ? atoi(argv[5]) != 0 : 1;
-    if (rows == 0 || queries == 0) {
-        fprintf(stderr, "rows와 queries는 1 이상이어야 해요\n");
+    uint64_t rows = 1000000u;
+    uint64_t queries64 = 1000u;
+    uint64_t seed = 20u;
+    uint64_t linear = 1u;
+    if ((argc > 2 && !parse_u64(argv[2], 1, SANS_MAX_ROWS, &rows)) ||
+        (argc > 3 && !parse_u64(argv[3], 1, MAX_QUERIES, &queries64)) ||
+        (argc > 4 && !parse_u64(argv[4], 0, UINT64_MAX, &seed)) ||
+        (argc > 5 && !parse_u64(argv[5], 0, 1, &linear))) {
+        fprintf(stderr, "인자 오류: rows는 1~%" PRIu64 ", queries는 1~%u, seed는 0 이상 "
+                        "정수, linear_id는 0 또는 1이에요\n",
+                (uint64_t)SANS_MAX_ROWS, MAX_QUERIES);
         return 2;
     }
+    const size_t queries = (size_t)queries64;
+    const int run_linear_id = linear == 1;
+
+    int rc = 1;
+    Storage *s = NULL;
+    BpTree *tree = NULL;
+    int64_t *ids = NULL;
+    uint64_t *t_index = NULL, *t_lin_id = NULL, *t_lin_name = NULL;
 
     printf("# index_bench\n");
     printf("빌드: gcc %s, BPTREE_ORDER=%d, sizeof(BpNode)=%zu, %s\n", __VERSION__,
@@ -261,52 +339,53 @@ int main(int argc, char **argv) {
     printf("조건: 행 %" PRIu64 ", 무작위 id %zu개, 시드 %" PRIu64 "\n", rows, queries, seed);
 
     if (!prepare(path, rows)) {
-        return 1;
+        goto done;
     }
 
-    /* 1. 열기(인덱스 구축 포함)와 전체 순회 1번 비용 */
+    /* 1. 열기(인덱스 구축 포함)와 전체 순회 1번 비용, 파일 없이 트리만 만들기 */
     uint64_t open_ns[OPEN_REPEAT], scan_ns[OPEN_REPEAT], build_ns[OPEN_REPEAT];
     for (int i = 0; i < OPEN_REPEAT; i++) {
-        Storage *s = NULL;
         uint64_t t0 = now_ns();
         DbStatus st = storage_open(path, &s);
         open_ns[i] = now_ns() - t0;
         if (st != DB_OK || s->index == NULL) {
             fprintf(stderr, "열기 실패 또는 인덱스 없음: %s\n", status_name(st));
-            storage_close(s);
-            return 1;
+            goto done;
         }
         size_t count = 0;
         t0 = now_ns();
         st = storage_scan(s, ignore_row, NULL, &count);
         scan_ns[i] = now_ns() - t0;
-        storage_close(s);
         if (st != DB_OK || count != rows) {
             fprintf(stderr, "scan 실패: %s\n", status_name(st));
-            return 1;
+            goto done;
+        }
+        int closed = close_ok(s, "측정");
+        s = NULL;
+        if (!closed) {
+            goto done;
         }
 
-        /* 파일 없이 트리만 만들기 (키 오름차순, 열기와 같은 순서) */
-        BpTree *tree = NULL;
         if (bptree_create(&tree) != DB_OK) {
-            return 1;
+            fprintf(stderr, "트리 만들기 메모리 부족\n");
+            goto done;
         }
         t0 = now_ns();
         for (uint64_t k = 1; k <= rows; k++) {
             if (bptree_insert(tree, (int64_t)k, k - 1) != DB_OK) {
                 fprintf(stderr, "트리 넣기 메모리 부족\n");
-                return 1;
+                goto done;
             }
         }
         build_ns[i] = now_ns() - t0;
         bptree_destroy(tree);
+        tree = NULL;
     }
 
-    Storage *s = NULL;
     DbStatus st = storage_open(path, &s);
     if (st != DB_OK || s->index == NULL) {
-        fprintf(stderr, "열기 실패: %s\n", status_name(st));
-        return 1;
+        fprintf(stderr, "열기 실패 또는 인덱스 없음: %s\n", status_name(st));
+        goto done;
     }
 
     /* 2. 인덱스 모양과 메모리 */
@@ -315,6 +394,7 @@ int main(int argc, char **argv) {
         walk(s->index->root, 1, &shape);
     }
     size_t bytes = shape.nodes * sizeof(BpNode) + sizeof(BpTree);
+    int tree_ok = bptree_check(s->index);
     printf("\n## 인덱스\n\n");
     printf("| 항목 | 값 |\n| --- | --- |\n");
     printf("| 높이 | %zu |\n", shape.height);
@@ -325,17 +405,16 @@ int main(int argc, char **argv) {
                               ((double)shape.leaves * (BPTREE_ORDER - 1))
                         : 0.0);
     printf("| 노드 메모리 (malloc 부가 비용 제외) | %.1fMiB |\n", (double)bytes / 1048576.0);
-    int tree_ok = bptree_check(s->index);
     printf("| bptree_check | %s |\n", tree_ok ? "통과" : "실패");
 
-    /* 3. 조회 */
-    int64_t *ids = malloc(queries * sizeof(*ids));
-    uint64_t *t_index = malloc(queries * sizeof(*t_index));
-    uint64_t *t_lin_id = malloc(queries * sizeof(*t_lin_id));
-    uint64_t *t_lin_name = malloc(queries * sizeof(*t_lin_name));
+    /* 3. 조회. queries ≤ MAX_QUERIES라 크기 계산이 넘치지 않아요. */
+    ids = malloc(queries * sizeof(*ids));
+    t_index = malloc(queries * sizeof(*t_index));
+    t_lin_id = malloc(queries * sizeof(*t_lin_id));
+    t_lin_name = malloc(queries * sizeof(*t_lin_name));
     if (ids == NULL || t_index == NULL || t_lin_id == NULL || t_lin_name == NULL) {
         fprintf(stderr, "메모리 부족\n");
-        return 1;
+        goto done;
     }
     uint64_t rng = seed;
     for (size_t i = 0; i < queries; i++) {
@@ -391,7 +470,11 @@ int main(int argc, char **argv) {
             mismatches++;
         }
     }
-    storage_close(s);
+    int closed = close_ok(s, "조회");
+    s = NULL;
+    if (!closed) {
+        goto done;
+    }
 
     printf("\n## 시간 (%d번 반복: 열기·순회·트리 / %zu개: 조회)\n\n", OPEN_REPEAT, queries);
     printf("| 항목 | 평균 | 중앙값 | 최소 | 최대 |\n");
@@ -407,10 +490,21 @@ int main(int argc, char **argv) {
 
     printf("\n불일치: %zu (무작위 id %zu개 + 없는 id %d개: 0, -1, %" PRIu64 "+1, INT64_MAX)\n",
            mismatches, queries, ABSENT_COUNT, rows);
+    rc = mismatches == 0 && tree_ok ? 0 : 1;
 
+done:
+    if (s != NULL && !close_ok(s, "정리")) {
+        rc = 1;
+    }
+    bptree_destroy(tree);
     free(ids);
     free(t_index);
     free(t_lin_id);
     free(t_lin_name);
-    return mismatches == 0 && tree_ok ? 0 : 1;
+    /* 표를 파일로 돌렸을 때 쓰기 실패(디스크 가득 등)도 실패로 알려요. */
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "표준 출력 쓰기 실패\n");
+        rc = 1;
+    }
+    return rc;
 }
