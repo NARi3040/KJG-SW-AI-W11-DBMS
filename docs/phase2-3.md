@@ -210,7 +210,7 @@ flowchart TD
 
 - 요청 본문은 SQL 원문 그대로예요([4.2절](#42-통신-방식-안건-6-a)). JSON으로 감싸지 않아요. 요청의 `Content-Type`은 검사하지 않고, 응답은 `Content-Type: application/json`이에요(추론).
 - 응답은 JSON이에요. 문장별 결과 목록이고, 오류면 문장 번호와 메시지를 담아요.
-- 문장을 실행하기 전에 거절하는 경우(요청 줄·헤더 오류 400, 413, 503)도 같은 모양의 JSON 본문을 보내요(추론). `results`는 빈 배열이고 `error`에 `statement`는 넣지 않아요. `category`는 `request`, `message`는 차례로 `malformed request`, `body too large`, `server busy`예요. 예: `{"ok":false,"results":[],"error":{"category":"request","message":"server busy"}}`
+- 문장을 실행하기 전에 거절하는 경우(요청 줄·헤더 오류 400, 브라우저 요청 403, 413, 503)도 같은 모양의 JSON 본문을 보내요(추론). `results`는 빈 배열이고 `error`에 `statement`는 넣지 않아요. `category`는 `request`, `message`는 차례로 `malformed request`, `forbidden`, `body too large`, `server busy`예요. 예: `{"ok":false,"results":[],"error":{"category":"request","message":"server busy"}}`
 - 요청 하나에 문장 여러 개를 허용해요. 지금 파서처럼 첫 오류에서 멈춰요. 트랜잭션이 없어서 오류 앞 문장은 이미 저장됐고, 응답의 `results`에 그 결과가 남아요. 실패한 문장의 결과는 `results`에 넣지 않아요. SELECT가 중간에 실패하면(손상·읽기·콜백 오류) 그때까지 버퍼에 모은 행도 버려요.
 - JSON 이스케이프는 따옴표·역슬래시·제어 문자만 처리해요. UTF-8이 아닌 바이트는 다루지 않아요.
 - `category`와 `message`는 CLI와 같은 문자열을 써요. `main.c`의 `status_category()`·`status_cause()`는 `static`이라 서버에서 부를 수 없으므로, 두 함수를 `server.c`에 복사해요(추론). `main.c`와 `dbms.h`는 고치지 않아요.
@@ -221,6 +221,7 @@ flowchart TD
 | --- | --- |
 | 200 | 모든 문장 성공, `ok: true` |
 | 400 | 요청 줄·헤더 오류, `DB_ERR_SYNTAX`·`ARG`·`SCHEMA`·`TYPE`·`RANGE` |
+| 403 | `Origin` 헤더가 있거나 `Host`가 `127.0.0.1`·`localhost`와 포트가 아님([4.4절](#44-스레드-풀-안건-8-전부-a)) |
 | 413 | 본문이 1MiB 초과 |
 | 500 | `DB_ERR_NOMEM`·`IO`·`CORRUPT`·`OUTPUT`·`WRITE_UNCERTAIN` |
 | 503 | 대기열 가득 참 |
@@ -287,6 +288,11 @@ flowchart LR
   - 파일은 `server.c` 하나예요. HTTP 처리, 스레드 풀, JSON 응답, `main()`이 다 들어가요. 다른 모듈의 공개 함수는 `parse_next()`·`execute()`·`storage_open()`·`storage_close()`만 불러요.
   - 실행 파일은 `dbms_server`이고, 데이터 파일은 CLI와 같은 현재 디렉터리의 `users.sans`예요.
   - `127.0.0.1`에만 열어요. 인증이 없어서 다른 컴퓨터에서 접속하지 못하게 해요.
+  - 같은 컴퓨터의 브라우저가 열어 둔 다른 사이트가 `POST /query`를 보내는 것(CSRF)은 루프백만으로 막히지 않아요. 그래서 서버가 직접 거절해요(403, `message`는 `forbidden`).
+    - `Origin` 헤더가 있으면 거절해요. 브라우저는 POST에 `Origin`을 붙이고, `curl`·Python 클라이언트는 붙이지 않아요.
+    - `Host` 헤더가 있으면 `127.0.0.1:<포트>` 또는 `localhost:<포트>`일 때만 받아요. DNS 리바인딩으로 들어온 요청을 막아요.
+    - `Content-Type`은 검사하지 않아요. 본문이 SQL 원문이라 `application/json`을 요구할 수 없고, `text/plain` 같은 단순 요청은 위 두 검사로 막아요.
+  - 서버가 켜져 있는 동안 같은 `users.sans`를 CLI나 다른 서버가 함께 여는 것은 지원하지 않아요. 전역 뮤텍스는 서버 프로세스 안에서만 통하고, 각 프로세스가 `storage_open()`에서 다음 id를 따로 읽어서 같은 id가 두 번 쓰이면 파일이 손상으로 판정돼요. 프로세스 사이 잠금은 두지 않아요.
   - 범위 밖이거나 정수가 아닌 값, 모르는 인자, 값 없는 인자는 표준 오류에 usage를 쓰고 종료 코드 1이에요(CLI와 같음). 저장소를 열기 전에 검사해요.
   - 시작 실패(`storage_open()`, `WSAStartup`, `bind`·`listen`, 스레드 만들기)는 표준 오류에 한 줄을 쓰고 종료 코드 1이에요.
   - Linux에서는 CLI처럼 `SIGPIPE`를 무시해요. 클라이언트가 먼저 끊어도 서버가 죽지 않아요.
@@ -440,6 +446,7 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 
 - id가 순서대로 늘어서 반반 분할 후 왼쪽 노드는 반만 찬 채로 남아요. 100만 건에서는 문제없어요.
 - `name`에 UTF-8이 아닌 바이트가 있으면 JSON 응답이 올바른 UTF-8이 아닐 수 있어요.
+- 서버가 켜져 있는 동안 같은 `users.sans`를 CLI나 다른 서버로 함께 열면 안 돼요. 프로세스 사이 잠금이 없어 같은 id가 두 번 쓰일 수 있어요([4.4절](#44-스레드-풀-안건-8-전부-a)).
 - DB 부분은 전역 뮤텍스 하나라 SELECT끼리도 차례로 실행돼요. 100만 행 name 조회(약 70ms) 동안 다른 요청은 기다려요(안건 9에서 따라 나온 것, 추론).
 - 요청 수신 시간 제한이 없어 연결만 열고 멈춘 클라이언트가 작업 스레드 하나를 붙잡아요.
 - WHERE 없는 SELECT는 전체 행을 한 응답으로 보내요.
