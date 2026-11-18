@@ -60,8 +60,12 @@ class ServerProcess:
         reader.join(START_TIMEOUT)
         line = lines[0] if lines else ""
         if "listening on" not in line:
-            self.stop()
-            raise RuntimeError(f"server did not start: {line!r} {self.proc.stderr.read()!r}")
+            self.proc.kill()  # stderr is read only after the process is gone, so read() ends
+            self.proc.wait(timeout=START_TIMEOUT)
+            error = self.proc.stderr.read()
+            self.proc.stdout.close()
+            self.proc.stderr.close()
+            raise RuntimeError(f"server did not start: {line!r} {error!r}")
         deadline = time.monotonic() + START_TIMEOUT
         while True:
             try:
@@ -315,7 +319,9 @@ class ServerTest(unittest.TestCase):
     def test_full_queue_gets_503(self):
         busy = {"ok": False, "results": [],
                 "error": {"category": "request", "message": "server busy"}}
-        small = ServerProcess(self.exe, self.data_dir.name, "--threads", "1", "--queue", "1")
+        # Own data directory: two processes must not open one users.sans (4.4).
+        small_dir = tempfile.TemporaryDirectory(prefix="dbms_server_small_")
+        small = ServerProcess(self.exe, small_dir.name, "--threads", "1", "--queue", "1")
         held = []
         try:
             for _ in range(2):  # one blocks the only worker, one fills the queue
@@ -330,11 +336,14 @@ class ServerTest(unittest.TestCase):
             for sock in held:
                 sock.close()
             small.stop()
+            small_dir.cleanup()
 
     def test_both_queues_full_still_gets_503(self):
         busy = {"ok": False, "results": [],
                 "error": {"category": "request", "message": "server busy"}}
-        small = ServerProcess(self.exe, self.data_dir.name, "--threads", "1", "--queue", "1")
+        # Own data directory: two processes must not open one users.sans (4.4).
+        small_dir = tempfile.TemporaryDirectory(prefix="dbms_server_small_")
+        small = ServerProcess(self.exe, small_dir.name, "--threads", "1", "--queue", "1")
         held = []
         try:
             for _ in range(2):  # one blocks the only worker, one fills the queue
@@ -360,6 +369,7 @@ class ServerTest(unittest.TestCase):
             for sock in held:
                 sock.close()
             small.stop()
+            small_dir.cleanup()
 
     def test_bad_arguments_exit_1_with_usage(self):
         for args in (["--threads", "0"], ["--threads", "257"], ["--port", "abc"],
