@@ -139,9 +139,9 @@ flowchart TD
 - CLI(`main.c`)에는 측정 코드를 넣지 않아요. 지금 CLI 테스트는 인자 2개 이상이면 usage 오류를 검사하므로(`tests/test_cli.py` `test_usage_extra_argument`) 인자 계약도 그대로예요.
 - 비교군
   - ① `WHERE id = …` + 인덱스: `storage_find_by_id()`
-  - ② `WHERE id = …` 선형: `storage_scan()`으로 id를 비교. 같은 열이라 인덱스 효과만 따로 보여요. 시간이 남을 때만 해요.
+  - ② `WHERE id = …` 선형: `storage_scan()`으로 id를 비교(추론. Notion 안은 "인덱스 끄기"였음). 같은 열이라 인덱스 효과만 따로 보여요. 시간이 남을 때만 해요.
   - ③ `WHERE name = …` 선형: 명세가 요구하는 비교
-- 키는 무작위로 1,000개 뽑아 평균·중앙값·p99를 내요. 인덱스 구축 시간과 인덱스 메모리 크기도 같이 적어요. 측정 환경(CPU, 디스크, 빌드 옵션)을 표에 적어요.
+- 키는 무작위로 1,000개 뽑아 평균과 중앙값을 내요. 인덱스 구축 시간과 인덱스 메모리 크기도 같이 적어요. 측정 환경(CPU, 디스크, 빌드 옵션)을 표에 적어요.
 - 시간 함수는 `clock_gettime(CLOCK_MONOTONIC)`이고 파일 맨 위에 `#define _POSIX_C_SOURCE 200809L`을 둬요. Linux에서 `-std=c11`만 주면 선언이 안 보이고, MinGW-w64에서는 winpthreads에 들어 있어 `-pthread`로 링크해야 해요. C11 `timespec_get`은 MinGW-w64 gcc 13에 선언이 없어 쓰지 않아요.
 - 측정 프로그램은 저장 모듈을 직접 불러 SQL 처리기를 거치지 않아요. "Phase 1 처리기와 연동"은 통합 테스트와 시연에서 보여요(추론).
 - 발표 그래프: "구축 1회 비용 vs 조회 1회 비용"과 "①②③ 문장당 시간".
@@ -155,7 +155,7 @@ flowchart TD
   - Linux: POSIX 소켓(`<sys/socket.h>`).
   - Windows: Winsock(`<winsock2.h>`). `WSAStartup` 초기화, 닫을 때 `closesocket`, `SOCKET` 자료형, `-lws2_32` 링크가 필요해요.
 - 스레드·뮤텍스·조건 변수는 `pthread`로 양쪽에서 같이 써요. MinGW에서는 winpthreads로 컴파일되고, `-static`으로 빌드해야 `libwinpthread-1.dll` 없이 실행돼요.
-- Linux에서 `-std=c11`만 주면 `pthread` 일부 선언이 안 보여요. `#define _POSIX_C_SOURCE 200809L`을 둬요.
+- Linux에서 `-std=c11`만 주면 `pthread_rwlock_t` 같은 일부 선언이 안 보여요. `#define _POSIX_C_SOURCE 200809L`을 둬요.
 - 스레드 수 기본값을 `sysconf(_SC_NPROCESSORS_ONLN)`으로 구하면 Windows에는 이 함수가 없어 따로 처리해야 해요(추론, 확인 안 됨).
 
 ### 4.2 통신 방식 (안건 6: A)
@@ -220,7 +220,7 @@ curl -s -X POST --data-binary "INSERT INTO users VALUES ('kim', 23); SELECT * FR
 | 항목 | 결정 |
 | --- | --- |
 | 스레드 수 | 고정. 실행 인자, 기본값은 CPU 코어 수. 측정에서 1·2·4·8로 바꿔 가며 비교 |
-| 대기열 크기 | 고정. 기본 128 |
+| 대기열 크기 | 고정. 크기는 예시로 128을 들었고 따로 정하지 않음 |
 | 가득 찼을 때 | 바로 503 응답 후 연결 닫기 |
 
 ```mermaid
@@ -238,7 +238,7 @@ flowchart LR
 ```
 
 - 갈래 C는 계약 PR 직후 가짜 `execute()`로 서버부터 만들 수 있어요.
-- 실행: `./dbms_server [--port 8080] [--threads N] [--queue 128]`.
+- 실행(초안, 합의 전): `./dbms_server [--port 8080] [--threads N] [--queue 128]`.
 
 ### 4.5 동시 접근 제어 (안건 9: A)
 
@@ -246,8 +246,8 @@ flowchart LR
 - 반드시 지킬 것([저장 설계 8.3절](storage.md#83-phase-3에서-낼-의견-여러-스레드))
   - INSERT의 "ID 발급 → 레코드 쓰기 → 헤더 쓰기 → 인덱스 갱신"은 한 잠금 안에서 함께 해요.
   - `FILE *` 하나는 위치가 하나라 위치 이동과 읽기를 같은 잠금 안에서 해요.
-- 그래서 DB 부분은 한 번에 하나씩만 돌아요. 병렬은 네트워크 입출력·파싱·JSON 만들기에 있어요. SELECT끼리 동시에 읽지 않아요.
-- 선택하지 않은 B(읽기·쓰기 잠금 + `pread`)는 측정에서 8스레드 name 조회가 5.2배 빨랐어요([5장](#5-참고-측정값)). 시간이 남아 바꾸려면 안건 2(Windows에 `pread` 없음)를 다시 봐야 해요.
+- 그래서 DB 부분은 한 번에 하나씩만 돌아요. 병렬은 네트워크·파싱에만 있어요. SELECT끼리 동시에 읽지 않아요.
+- 선택하지 않은 B(읽기·쓰기 잠금 + `pread`)는 측정에서 8스레드 name 조회가 초당 99번으로, A(12번)의 약 8배였어요([5장](#5-참고-측정값)). 시간이 남아 바꾸려면 안건 2(Windows에 `pread` 없음)를 다시 봐야 해요.
 
 ### 4.6 결과 전송 시점 (안건 13: 기본값)
 
@@ -291,7 +291,7 @@ Notion 페이지의 시제품(`bptree.c`, `storage_bench.c`, `conc_bench.c`, `sc
 | 512 | 3 | 30.7MiB | 41ms | 84ms | 131ns | 1.46µs |
 
 - 500만 행, 차수 512: 높이 3, 153.3MiB, 열 때 비용 432ms, 조회 1.68µs. 같은 크기에서 선형 순회는 205ms예요.
-- 64 이상끼리는 찾기·조회 차이가 측정 흔들림 안이에요.
+- 32 이상끼리는 찾기·조회 차이가 측정 흔들림 안이에요.
 - 오름차순으로만 넣어서 리프가 반만 차요(차수 64에서 50.8%).
 
 ### 5.3 비교군 (100만 행, 저장 API 직접 호출, 무작위 id 1,000개)
@@ -356,7 +356,7 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 ### Phase 3
 
 - [ ] `curl`로 INSERT·SELECT 동작
-- [ ] Linux와 Windows MinGW-w64에서 서버 빌드·실행
+- [ ] Linux와 Windows MinGW-w64에서 서버 빌드·실행 (안건 2에서 따라 나온 것, 추론)
 - [ ] 동시 INSERT 뒤 id 중복 없음, 행 수 일치
 - [ ] 스레드 수 1·2·4·8 처리량 표
 - [ ] ThreadSanitizer 경고 0
@@ -378,7 +378,7 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 
 - id가 순서대로 늘어서 반반 분할 후 왼쪽 노드는 반만 찬 채로 남아요. 100만 건에서는 문제없어요.
 - `name`에 UTF-8이 아닌 바이트가 있으면 JSON 응답이 올바른 UTF-8이 아닐 수 있어요.
-- DB 부분은 전역 뮤텍스 하나라 SELECT끼리도 차례로 실행돼요. 100만 행 name 조회(약 70ms) 동안 다른 요청은 기다려요.
+- DB 부분은 전역 뮤텍스 하나라 SELECT끼리도 차례로 실행돼요. 100만 행 name 조회(약 70ms) 동안 다른 요청은 기다려요(안건 9에서 따라 나온 것, 추론).
 - 요청 수신 시간 제한이 없어 연결만 열고 멈춘 클라이언트가 작업 스레드 하나를 붙잡아요.
 - WHERE 없는 SELECT는 전체 행을 한 응답으로 보내요.
 - 종료 처리 핸들러는 두지 않아요. 쓰기마다 `fflush`하고 헤더를 INSERT마다 갱신하므로 Ctrl+C로 꺼도 데이터와 다음 id는 남아요. INSERT 도중에 꺼지면 "레코드 → 헤더" 순서 덕에 그 행만 없고 파일은 일관돼요.
@@ -392,4 +392,4 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 | 안건 15. Notion 설계안과 레포 차이 정리 | 나중 안건, 내용 없음 |
 | 안건 2의 방식 | 둘 다 지원은 정했지만 호환 헤더(B)인지 완전 양쪽 처리(C)인지는 안 정함 |
 | 안건 10의 세부 | 노도현이 정함 |
-| Windows 스레드 수 기본값 | `sysconf`가 없어 대신할 방법을 정해야 함 |
+| Windows 스레드 수 기본값 | `sysconf`가 없어 대신할 방법을 정해야 할 수 있음(추론, 확인 안 됨) |
