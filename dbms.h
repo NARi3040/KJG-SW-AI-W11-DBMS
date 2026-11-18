@@ -118,9 +118,10 @@ DbStatus storage_insert(Storage *storage, const char *name,
 DbStatus storage_scan(Storage *storage, RowHandler on_row,
                       void *user_data, size_t *out_count);
 
-/* id가 같은 행을 0개 또는 1개 on_row로 넘겨요. 콜백 계약은 storage_scan()과
- * 같아요. 못 찾으면 오류가 아니라 DB_OK이고 *out_count는 0이에요. 0·음수
- * id도 0행이에요(SQL의 id < 1 거절은 실행기가 해요). */
+/* id가 같은 행을 0개 또는 1개 on_row로 넘겨요. 콜백 계약, 반환값과 *out_count
+ * 규칙은 storage_scan()과 같고 읽은 레코드도 같은 방식으로 검사해요. 못 찾으면
+ * 오류가 아니라 DB_OK이고 *out_count는 0이에요. 0·음수 id도 0행이에요(SQL의
+ * id < 1 거절은 실행기가 해요). 인덱스를 못 쓸 때의 전체 순회는 첫 일치에서 멈춰요. */
 DbStatus storage_find_by_id(Storage *storage, int64_t id, RowHandler on_row,
                             void *user_data, size_t *out_count);
 

@@ -15,8 +15,14 @@
 #ifndef BPTREE_ORDER
 #define BPTREE_ORDER 512 /* 노드 하나의 최대 자식 수. 테스트는 -DBPTREE_ORDER=4 */
 #endif
+#if BPTREE_ORDER < 3
+#error "BPTREE_ORDER must be at least 3"
+#endif
 
 typedef struct BpTree BpTree;
+
+/* 포인터 인자는 NULL을 받지 않아요(assert). 통계·메모리 크기 함수나 메모리 부족
+ * 시험용 할당 훅이 필요하면 bptree.c 안에 테스트·측정 전용으로 두고 여기에 넣지 않아요. */
 
 /* 빈 트리를 만들어요. DB_OK 또는 DB_ERR_NOMEM이고, 실패하면 *out_tree는 NULL이에요. */
 DbStatus bptree_create(BpTree **out_tree);
@@ -25,7 +31,8 @@ DbStatus bptree_create(BpTree **out_tree);
 void bptree_destroy(BpTree *tree);
 
 /* DB_OK 또는 DB_ERR_NOMEM이에요. DB_ERR_NOMEM이면 트리는 호출 전 그대로예요.
- * 이미 있는 키는 넘기지 않아요. 중복 처리 경로 없이 assert만 둬요. */
+ * 키는 어떤 순서로 넣어도 돼요(저장 모듈은 오름차순으로 넣음). 이미 있는 키는
+ * 넘기지 않아요. 중복 처리 경로 없이 assert만 둬요. */
 DbStatus bptree_insert(BpTree *tree, int64_t key, uint64_t value);
 
 /* 찾으면 1을 돌려주고 *out_value를 채워요. 없으면 0이고 *out_value는 그대로예요. */

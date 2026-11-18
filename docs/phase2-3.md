@@ -196,7 +196,8 @@ flowchart TD
   - Windows: Winsock(`<winsock2.h>`). `WSAStartup` 초기화, 닫을 때 `closesocket`, `SOCKET` 자료형, `-lws2_32` 링크가 필요해요.
 - 스레드·뮤텍스·조건 변수는 `pthread`로 양쪽에서 같이 써요. `pthread`는 서버만 쓰고 CLI(`main.c`)와 저장 모듈은 쓰지 않아서, CLI와 기존 테스트 빌드 명령은 그대로예요. MinGW에서는 winpthreads로 컴파일되고, `-static`으로 빌드해야 `libwinpthread-1.dll` 없이 실행돼요.
 - Linux에서 `-std=c11`만 주면 `pthread_rwlock_t` 같은 일부 선언이 안 보여요. `#define _POSIX_C_SOURCE 200809L`을 둬요.
-- 스레드 수 기본값을 `sysconf(_SC_NPROCESSORS_ONLN)`으로 구하면 Windows에는 이 함수가 없어 따로 처리해야 해요(추론, 확인 안 됨).
+- ~~스레드 수 기본값을 `sysconf(_SC_NPROCESSORS_ONLN)`으로 구하면 Windows에는 이 함수가 없어 따로 처리해야 해요(추론, 확인 안 됨).~~
+  - #17: Windows는 `GetSystemInfo()`를 써요. x86_64-w64-mingw32-gcc 13에서 `-static -lws2_32`로 빌드되는 것을 확인했어요.
 
 ### 4.2 통신 방식 (안건 6: A)
 
@@ -264,7 +265,7 @@ curl -s -X POST --data-binary "INSERT INTO users VALUES ('kim', 23); SELECT * FR
 | 항목 | 결정 |
 | --- | --- |
 | 스레드 수 | 고정. 실행 인자, 기본값은 CPU 코어 수. 측정에서 1·2·4·8로 바꿔 가며 비교 |
-| 대기열 크기 | 고정. 크기는 예시로 128을 들었고 따로 정하지 않음 |
+| 대기열 크기 | 고정. 실행 인자, 기본값 128(#17에서 정함) |
 | 가득 찼을 때 | 바로 503 응답 후 연결 닫기 |
 
 ```mermaid
@@ -285,16 +286,18 @@ flowchart LR
 - 서버 구성(#17에서 확정):
   - 파일은 `server.c` 하나예요. HTTP 처리, 스레드 풀, JSON 응답, `main()`이 다 들어가요. 다른 모듈의 공개 함수는 `parse_next()`·`execute()`·`storage_open()`·`storage_close()`만 불러요.
   - 실행 파일은 `dbms_server`이고, 데이터 파일은 CLI와 같은 현재 디렉터리의 `users.sans`예요.
+  - `127.0.0.1`에만 열어요. 인증이 없어서 다른 컴퓨터에서 접속하지 못하게 해요.
+  - 범위 밖이거나 정수가 아닌 값, 모르는 인자, 값 없는 인자는 표준 오류에 usage를 쓰고 종료 코드 1이에요(CLI와 같음). 저장소를 열기 전에 검사해요.
+  - 시작 실패(`storage_open()`, `WSAStartup`, `bind`·`listen`, 스레드 만들기)는 표준 오류에 한 줄을 쓰고 종료 코드 1이에요.
+  - Linux에서는 CLI처럼 `SIGPIPE`를 무시해요. 클라이언트가 먼저 끊어도 서버가 죽지 않아요.
+  - 빌드: Linux `gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread server.c parser.c execute.c storage.c bptree.c -o dbms_server`, Windows MinGW-w64는 끝에 `-static -lws2_32`를 더해요.
   - 실행: `./dbms_server [--port P] [--threads N] [--queue Q]`
 
 | 인자 | 기본값 | 허용 범위 |
 | --- | --- | --- |
 | `--port` | 8080 | 1–65535 |
-| `--threads` | CPU 코어 수(Linux `sysconf(_SC_NPROCESSORS_ONLN)`, Windows `GetSystemInfo()`). 못 구하면 4 | 1–256 |
+| `--threads` | CPU 코어 수(Linux `sysconf(_SC_NPROCESSORS_ONLN)`, Windows `GetSystemInfo()`). 못 구하면 4, 256보다 많으면 256 | 1–256 |
 | `--queue` | 128 | 1–4096 |
-
-  - 범위 밖이거나 정수가 아닌 값, 모르는 인자, 값 없는 인자는 표준 오류에 usage를 쓰고 종료 코드 1이에요(CLI와 같음). 저장소를 열기 전에 검사해요.
-  - 빌드: Linux `gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread server.c parser.c execute.c storage.c bptree.c -o dbms_server`, Windows MinGW-w64는 끝에 `-static -lws2_32`를 더해요.
 
 ### 4.5 동시 접근 제어 (안건 9: A)
 
@@ -401,7 +404,7 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 - Notion 초안에 있던 측정용 `storage_set_index_enabled()`와 CLI 환경 변수(`DBMS_TIMING`, `DBMS_NO_INDEX`)는 안건 5가 C로 정해져 넣지 않아요. 비교군 ②는 측정 프로그램이 `storage_scan()`으로 재요(추론).
 - `storage_open()`은 선언이 그대로예요. 재구축이 끝까지 가지 못할 때의 결과는 [3.3절](#33-인덱스를-만드는-시점-안건-11-a)대로예요.
 - 서버 파일 구성(`server.c`, 스레드 풀, HTTP 처리)과 실행 인자는 [4.4절](#44-스레드-풀-안건-8-전부-a)대로예요. 오류 `category`·`message`의 출처는 [4.3절](#43-요청응답-형식-안건-7-a)대로예요.
-- 계약 PR에서 [architecture.md 7절](architecture.md#7-세부-설계에서-확정할-사항)의 Phase 2·3 항목도 이 결정으로 채워요.
+- [architecture.md 7절](architecture.md#7-세부-설계에서-확정할-사항)의 Phase 2·3 항목도 이 결정으로 채웠어요.
 
 ## 7. 완료 기준
 
@@ -451,4 +454,4 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 | 안건 15. Notion 설계안과 레포 차이 정리 | 나중 안건, 내용 없음 |
 | 안건 2의 방식 | 둘 다 지원은 정했지만 호환 헤더(B)인지 완전 양쪽 처리(C)인지는 안 정함 |
 | 안건 10의 세부 | 노도현이 정함 |
-| Windows 스레드 수 기본값 | `sysconf`가 없어 대신할 방법을 정해야 할 수 있음(추론, 확인 안 됨) |
+| ~~Windows 스레드 수 기본값~~ | ~~`sysconf`가 없어 대신할 방법을 정해야 할 수 있음~~ → #17: `GetSystemInfo()`([4.1절](#41-지원-플랫폼-안건-2-둘-다)) |

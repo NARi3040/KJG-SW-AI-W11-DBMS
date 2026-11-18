@@ -135,6 +135,8 @@ DbStatus storage_insert(Storage *storage, const char *name,
                         int64_t age, InsertResult *out_result);
 DbStatus storage_scan(Storage *storage, RowHandler on_row,
                       void *user_data, size_t *out_count);
+DbStatus storage_find_by_id(Storage *storage, int64_t id, RowHandler on_row,
+                            void *user_data, size_t *out_count); // Phase 2, #17
 DbStatus storage_close(Storage *storage);
 ```
 

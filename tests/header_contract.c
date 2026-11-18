@@ -4,10 +4,10 @@
  * 포함 가드, 한도·배열 용량, 공개 타입 필드, 함수 시그니처를 확인해요.
  * 구현이 없으므로 실행하지 않고 -fsyntax-only로만 검사해요.
  */
+#include "bptree.h" /* 먼저 포함해 bptree.h 혼자 컴파일되는지도 봐요. */
+#include "bptree.h"
 #include "dbms.h"
 #include "dbms.h"
-#include "bptree.h"
-#include "bptree.h"
 
 /* ---------- 한도 ---------- */
 
@@ -16,7 +16,7 @@ _Static_assert(DB_STRING_MAX == 255, "DB_STRING_MAX");
 _Static_assert(DB_VALUES_MAX == 16, "DB_VALUES_MAX");
 _Static_assert(PARSE_ERROR_SIZE == 128, "PARSE_ERROR_SIZE");
 _Static_assert(USERS_NAME_MAX == 64, "USERS_NAME_MAX");
-_Static_assert(BPTREE_ORDER >= 3, "BPTREE_ORDER");
+_Static_assert(BPTREE_ORDER == 512, "BPTREE_ORDER");
 
 /* ---------- 배열 용량 ---------- */
 
