@@ -87,13 +87,20 @@ class Server:
         self.stderr_file = None
         self.proc = None
         self.port = None
+        self.tsan_read = False
 
     def start(self):
         self.port = free_port()
         self.stderr_file = open(self.stderr_path, "ab")
+        # A TSAN_OPTIONS log_path inherited from the shell would send warnings
+        # to another file, and this log would look clean. Keep the other
+        # options; the later log_path wins.
+        env = os.environ.copy()
+        tsan_options = env.get("TSAN_OPTIONS", "").strip()
+        env["TSAN_OPTIONS"] = (tsan_options + " " if tsan_options else "") + "log_path=stderr"
         self.proc = subprocess.Popen(
             [str(self.exe), "--port", str(self.port), "--threads", str(self.threads)],
-            cwd=str(self.dir), stdout=subprocess.PIPE, stderr=self.stderr_file)
+            cwd=str(self.dir), stdout=subprocess.PIPE, stderr=self.stderr_file, env=env)
         lines = []
         reader = threading.Thread(target=lambda: lines.append(self.proc.stdout.readline()),
                                   daemon=True)
@@ -131,12 +138,22 @@ class Server:
                 raise
             return ""
 
+    def stop(self, failures, label):
+        """Planned stop (like Ctrl+C). If the server had already exited on its
+        own, that is a failure: a crashed server leaves no TSan warning and
+        would otherwise look clean."""
+        if self.proc is not None and self.proc.poll() is not None:
+            failures.append(f"{label}: server exited on its own "
+                            f"(code {self.proc.returncode}) before it was stopped")
+        self.kill()
+
     def tsan_reports(self, failures, label):
         """Count of TSan warnings. Stops the server first, so every warning it
         could write is in the log before it is read (kill() waits for the
         process). If the log cannot be read the run is a failure, not
         "0 warnings", and -1 is returned."""
-        self.kill()
+        self.stop(failures, label)
+        self.tsan_read = True
         try:
             text = self.stderr_text()
         except OSError as exc:
@@ -144,7 +161,14 @@ class Server:
             return -1
         return sum(1 for line in text.splitlines() if "WARNING: ThreadSanitizer" in line)
 
-    def cleanup(self):
+    def cleanup(self, failures=None, label="cleanup"):
+        """Stop and delete the directory. If a suite ended early (e.g. a client
+        wait timed out) before reading the TSan log, read it here first, so
+        warnings already written are reported, not deleted."""
+        if failures is not None and not self.tsan_read and self.stderr_file is not None:
+            tsan = self.tsan_reports(failures, label)
+            if tsan > 0:
+                failures.append(f"{label}: ThreadSanitizer reported {tsan}")
         self.kill()
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -389,7 +413,7 @@ def suite_throughput(opt, pool, failures):
                                 pause=opt.pause)
                 r["tsan"] = server.tsan_reports(failures, f"throughput threads={threads} {kind}")
             finally:
-                server.cleanup()
+                server.cleanup(failures, f"throughput threads={threads} {kind}")
             table[(threads, kind)] = r
             print(f"  threads={threads} {kind}: {r['rps']:.1f} req/s, "
                   f"p50 {r['p50_ms']:.2f}ms, p99 {r['p99_ms']:.2f}ms, done {r['done']}, "
@@ -447,7 +471,7 @@ def suite_blocking(opt, pool, failures):
             else:
                 bg_pool.terminate()  # close() would wait for unfinished name jobs
             bg_pool.join()
-        server.cleanup()
+        server.cleanup(failures, "blocking")
 
     overlapped = (name["first"] is not None and busy["first"] is not None
                   and name["last"] is not None and busy["last"] is not None
@@ -484,15 +508,22 @@ def suite_correctness(opt, pool, failures):
         sent = {}
         problems = []
         duplicates = 0
-        for c, (ok_ids, errs) in enumerate(results):
+        spans = []  # (first INSERT sent, last INSERT answered) per client
+        for c, (ok_ids, errs, first, last) in enumerate(results):
             problems.extend(errs)
+            if first is not None and last is not None:
+                spans.append((first, last))
             for i, rid in ok_ids:
                 if rid in sent:
                     duplicates += 1
                     problems.append(f"duplicate id {rid}")
                 sent[rid] = (f"c{c}_{i}", c)
+        # The shared start time only stops clients from starting early; check
+        # that two different clients' INSERT spans really overlapped.
+        concurrent = sum(1 for a in range(len(spans)) for b in range(a + 1, len(spans))
+                         if spans[a][0] < spans[b][1] and spans[b][0] < spans[a][1])
         rows_now = select_all(server.port)
-        server.kill()  # like Ctrl+C: no shutdown handler
+        server.stop(failures, "correctness (before restart)")  # like Ctrl+C
         server.start()  # same directory and users.sans; stderr file is appended
         rows_restart = select_all(server.port)
         try:
@@ -502,7 +533,7 @@ def suite_correctness(opt, pool, failures):
             next_id = None
         tsan = server.tsan_reports(failures, "correctness")  # both runs
     finally:
-        server.cleanup()
+        server.cleanup(failures, "correctness")
 
     def same(rows):
         # Check types before building a set, so a bad row is a failed check,
@@ -515,6 +546,8 @@ def suite_correctness(opt, pool, failures):
                 and all(sent.get(r["id"]) == (r.get("name"), r["age"]) for r in rows))
 
     checks = [
+        ("서로 다른 클라이언트의 INSERT 구간이 실제로 겹침", concurrent > 0,
+         f"겹친 클라이언트 쌍 {concurrent}"),
         ("INSERT 응답 수 = 보낸 수", len(sent) == total and not problems, f"{len(sent):,} / {total:,}"),
         ("응답 id 중복 없음", duplicates == 0, str(duplicates)),
         ("id가 1..N 빈틈 없음", set(sent) == set(range(1, total + 1)),
@@ -543,18 +576,23 @@ def insert_worker(args):
         time.sleep(0.001)
     ok_ids = []
     errs = []
+    first = None
+    last = None
     for i in range(count):
+        if first is None:
+            first = time.monotonic()
         try:
             status, body = post(port, f"INSERT INTO users VALUES ('c{c}_{i}', {c});")
         except REQUEST_ERRORS as exc:
             errs.append(f"client {c} insert {i}: {type(exc).__name__}")
             continue
+        last = time.monotonic()
         rid = insert_id(body) if status == 200 else None
         if rid is None:
             errs.append(f"client {c} insert {i}: HTTP {status} {str(body)[:80]}")
             continue
         ok_ids.append((i, rid))
-    return ok_ids, errs
+    return ok_ids, errs, first, last
 
 
 def select_all(port):
