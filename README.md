@@ -9,6 +9,7 @@ C로 구현하는 바이너리 파일 기반 DBMS의 팀 설계 문서입니다.
 - [저장 세부 설계](docs/storage.md) — `.sans` 바이트 형식, 자동 ID, 기록 순서와 복구, `Row` 구조, 테스트 기대값
 - [Phase 2·3 계획](docs/phase2-3.md) — B+ 트리 인덱스와 API 서버의 회의 결정, 일정, 계약, 완료 기준
 - [인덱스 성능 측정](docs/bench.md) — 100만 행에서 id 인덱스 조회와 선형 조회 비교, 인덱스 구축 시간과 메모리
+- [병렬 처리 검증](docs/parallel.md) — API 서버의 스레드 수별 처리량, 잠금 때문에 기다리는 시간, 동시 INSERT 정확성, ThreadSanitizer
 
 ## 빌드와 테스트
 
