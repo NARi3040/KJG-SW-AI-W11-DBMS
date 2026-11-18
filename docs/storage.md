@@ -350,7 +350,7 @@ static size_t   read_at(FILE *fp, uint64_t offset, void *buf, size_t len);
 | 고정 길이 레코드 | 4.2절 | 위치만 알면 한 번에 그 행을 읽을 수 있어요. Phase 2에서 인덱스가 찾은 행만 바로 읽어요 |
 | `Row.row_index` | S-1 | Phase 2 시작 때 `storage_scan()` 한 번으로 `id → row_index` 인덱스를 다시 만들 수 있어요. `Row`를 다시 바꾸지 않아요 |
 | `InsertResult.row_index` | S-3 | INSERT 직후 새 행을 인덱스에 넣을 값이 바로 있어요 |
-| 전역·`static` 상태 없음 | 3.2절 | Phase 3에서 잠금을 `Storage` 안에만 넣으면 돼요 |
+| 전역·`static` 상태 없음 | 3.2절 | Phase 3에서 잠금을 `Storage` 안에만 넣으면 돼요. 실제로는 서버가 `execute()` 호출을 감싸기로 정했어요([Phase 2·3 계획 4.5절](phase2-3.md#45-동시-접근-제어-안건-9-a)) |
 | 읽고 쓸 때마다 위치부터 잡음 | 5.3절, 7장 | 파일 위치를 다른 호출이 옮겨 놓아도 결과가 같아요. Phase 3에서 잠금을 넣을 때 입출력 코드를 다시 짜지 않아요 |
 | 재진입 검사 표시 없음 | 5.3절 | Phase 3의 잠금 설계를 지금 묶어 두지 않아요 |
 
@@ -372,7 +372,7 @@ DbStatus storage_fetch(Storage *storage, uint64_t row_index,
 
 ### 8.3 Phase 3에서 낼 의견: 여러 스레드
 
-잠금 종류와 위치는 Phase 3에서 정해요. 지금 `Storage`는 **스레드 안전하지 않아요.** 그때 저장 쪽에서 지켜야 할 조건만 적어 둬요.
+잠금 종류와 위치는 Phase 3에서 정해요(정한 내용: 서버의 전역 뮤텍스 하나가 `execute()` 호출을 감쌈, [Phase 2·3 계획 4.5절](phase2-3.md#45-동시-접근-제어-안건-9-a)). 아래 조건은 그 방식에서도 지켜져요. 지금 `Storage`는 **스레드 안전하지 않아요.** 그때 저장 쪽에서 지켜야 할 조건만 적어 둬요.
 
 - INSERT의 "ID 발급 → 레코드 쓰기 → 헤더 쓰기"는 잠금 하나 안에서 함께 해야 해요. 나뉘면 같은 ID가 두 번 나와요.
 - `broken`과 `row_count`도 같은 잠금 안에서 읽고 써요.

@@ -48,7 +48,7 @@
 | 11:10–12:00 | 계약 PR: `bptree.h`, `dbms.h` 추가 선언, 서버 파일 구성 | 세 명 승인 |
 | 13:00–17:00 | 갈래 A·B·C 동시 구현 | 갈래마다 단위 테스트 통과 |
 | 17:00–18:00 | Phase 2 통합, 100만 건 측정 | 측정표 기록, 전체 테스트 통과 |
-| 19:00–22:00 | Phase 3 잠금 연결, 서버 연동, 부하 테스트, TSan | 동시 요청 결과 정확, TSan 경고 0 |
+| 19:00–22:00 | 서버에 실제 `execute()`와 전역 뮤텍스 연결, 부하 테스트, TSan | 동시 요청 결과 정확, TSan 경고 0 |
 | 22:00–24:00 | 버그 수정, README·docs 갱신 | `main` 병합 |
 | 11/19 08:00–09:30 | 발표 자료, 시연 리허설 | 09:30 코드 동결 |
 
@@ -59,7 +59,7 @@ flowchart LR
   M --> C["갈래 C: HTTP + 스레드 풀 (가짜 execute로 먼저)"]
   A --> P2["Phase 2 통합 · 100만 건 측정"]
   B --> P2
-  P2 --> L["Phase 3 잠금 연결"]
+  P2 --> L["서버에 실제 execute · 전역 뮤텍스 연결"]
   C --> L
   L --> T["부하 테스트 · TSan · 발표 준비"]
 ```
@@ -75,7 +75,7 @@ flowchart LR
 
 ### 이슈 나누기
 
-#17이 병합된 뒤 나머지를 동시에 시작해요. 화살표는 "먼저 끝나야 하는 것"이에요.
+#17이 병합되면 #18, #19, #21을 동시에 시작해요. #20·#22는 선행 이슈가 끝난 뒤예요. 화살표는 "먼저 끝나야 하는 것"이에요.
 
 | 이슈 | 내용 | 담당(제안) | 선행 |
 | --- | --- | --- | --- |
@@ -103,8 +103,8 @@ flowchart LR
 | 파일 | 고치는 이슈 | 내용 |
 | --- | --- | --- |
 | `dbms.h`, `bptree.h` | #17 | 이후 바꾸려면 세 명이 다시 합의 |
-| `tests/run_tests.py` | #18, #19, #21 | #18은 트리 테스트 등록, #19는 `SOURCES`와 storage 테스트 빌드 줄에 `bptree.c` 추가, #21은 서버 빌드 등록. 나중에 병합하는 쪽이 rebase |
-| `tests/test_integration.py`, README 빌드 명령 | #19 | `bptree.c` 추가 |
+| `tests/run_tests.py` | #18, #19, #21 | #18은 트리 테스트 등록, #19는 `storage_regression`·`storage_s01_s02` 빌드 줄에 `bptree.c` 추가(`SOURCES`는 존재 확인용), #21은 서버 빌드 등록. 나중에 병합하는 쪽이 rebase |
+| `tests/test_integration.py` `SOURCES`, README·`tests/README.md` 빌드 명령, `tests/storage_test.c` 맨 위 빌드 주석 | #19 | `bptree.c` 추가. `storage_test.c`는 `storage.c`를 `#include`하므로 `bptree.c`를 같이 링크해야 함 |
 | `tests/test_execute.c` | #19 | 저장 스텁에 `storage_find_by_id` 추가. 없으면 실행기가 새 함수를 부르는 순간 링크 오류 |
 | `execute.c` | #19 | 최무헌이 리뷰 |
 
@@ -282,8 +282,8 @@ flowchart LR
 - 잠금을 서버에 두는 이유: 저장 모듈 안에 두면 `storage.c`가 `pthread`를 쓰게 돼 CLI와 모든 테스트 빌드에 `-pthread`(Windows는 `-static`도)를 더해야 해요. 서버에 두면 `storage.c`와 CLI 빌드는 바뀌지 않아요.
 - 반드시 지킬 것([저장 설계 8.3절](storage.md#83-phase-3에서-낼-의견-여러-스레드))
   - INSERT의 "ID 발급 → 레코드 쓰기 → 헤더 쓰기 → 인덱스 갱신"은 한 잠금 안에서 함께 해요. `storage_insert()` 한 번이 `execute()` 안에서 불리므로 지켜져요.
-  - `FILE *` 하나는 위치가 하나라 위치 이동과 읽기를 같은 잠금 안에서 해요. 저장 함수는 모두 `execute()` 안에서만 불리므로 지켜져요.
-  - 서버는 `execute()` 밖에서 저장 함수를 직접 부르지 않아요.
+  - `FILE *` 하나는 위치가 하나라 위치 이동과 읽기를 같은 잠금 안에서 해요. `storage_open()`·`storage_close()`를 뺀 저장 함수는 모두 `execute()` 안에서만 불리므로 지켜져요.
+  - 서버는 `storage_open()`을 작업 스레드를 만들기 전에, `storage_close()`를 작업 스레드가 모두 끝난 뒤에 불러요. 그 밖의 저장 함수는 `execute()` 밖에서 직접 부르지 않아요.
 - 그래서 DB 부분은 한 번에 하나씩만 돌아요. 병렬은 네트워크·파싱에만 있어요. SELECT끼리 동시에 읽지 않아요.
 - 선택하지 않은 B(읽기·쓰기 잠금 + `pread`)는 측정에서 8스레드 name 조회가 초당 99번으로, A(12번)의 약 8배였어요([5장](#5-참고-측정값)). 시간이 남아 바꾸려면 잠금을 저장 모듈 안으로 옮기고 안건 2(Windows에 `pread` 없음)를 다시 봐야 해요.
 
