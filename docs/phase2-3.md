@@ -186,6 +186,7 @@ flowchart TD
 - 시간 함수는 `clock_gettime(CLOCK_MONOTONIC)`이고 파일 맨 위에 `#define _POSIX_C_SOURCE 200809L`을 둬요. Linux에서 `-std=c11`만 주면 선언이 안 보이고, MinGW-w64에서는 winpthreads에 들어 있어 `-pthread`로 링크해야 해요. C11 `timespec_get`은 MinGW-w64 gcc 13에 선언이 없어 쓰지 않아요.
 - 측정 프로그램은 저장 모듈을 직접 불러 SQL 처리기를 거치지 않아요. "Phase 1 처리기와 연동"은 통합 테스트와 시연에서 보여요(추론).
 - 발표 그래프: "구축 1회 비용 vs 조회 1회 비용"과 "①②③ 문장당 시간".
+- **#20 결과:** 측정 프로그램은 [`bench/index_bench.c`](../bench/index_bench.c), 측정표와 환경은 [인덱스 성능 측정](bench.md)이에요. 100만 행에서 ① 중앙값 3.98µs, ③ 43.2ms, 열기(구축 포함) 69ms, 인덱스 메모리 30.8MiB, 불일치 0이에요(Linux, 노도현 PC).
 
 ## 4. Phase 3: API 서버
 

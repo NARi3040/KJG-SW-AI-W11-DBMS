@@ -43,6 +43,11 @@ def run(command, cwd=ROOT, timeout=TIMEOUT):
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            # Child output (e.g. index_bench's Korean table) is UTF-8. The
+            # locale default (cp949, cp1252) can fail to decode it, so never
+            # let decoding hide a result.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
@@ -66,7 +71,9 @@ def missing(name, paths):
     record(name, "MISSING", f"missing {names}")
 
 
-def compile_and_run(name, sources, build_dir, run_cwd=None, flags=(), required=()):
+def compile_and_run(
+    name, sources, build_dir, run_cwd=None, flags=(), required=(), args=()
+):
     # required: files that must exist but are not linked (e.g. a module the
     # test includes directly).
     absent = [path for path in (*sources, *required) if not path.is_file()]
@@ -89,8 +96,8 @@ def compile_and_run(name, sources, build_dir, run_cwd=None, flags=(), required=(
         )
         return
 
-    print("[RUN] " + str(exe) + f" (cwd={run_cwd or ROOT})")
-    executed = run([exe], cwd=run_cwd or ROOT)
+    print("[RUN] " + " ".join(str(part) for part in (exe, *args)) + f" (cwd={run_cwd or ROOT})")
+    executed = run([exe, *args], cwd=run_cwd or ROOT)
     if executed.returncode != 0:
         record(
             name,
@@ -141,6 +148,12 @@ def run_python(name, script, required):
 
 def main():
     global GCC
+    # Child output is decoded as UTF-8 (see run()), so diagnostics may hold
+    # characters the console or redirect encoding (cp1252, cp949) cannot
+    # represent. Escape just those instead of stopping before the summary.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     GCC = resolve_gcc()
 
     run_python(
@@ -180,6 +193,18 @@ def main():
                 [ROOT / "storage.c", ROOT / "bptree.c", TESTS / "test_storage_contract.c"],
                 build_dir,
                 run_cwd=pathlib.Path(storage_cwd),
+            )
+            # index_bench.c includes storage.c and bptree.c itself. A small run
+            # keeps it building and checks index results equal linear results;
+            # the 1M-row measurement is run by hand (docs/bench.md).
+            compile_and_run(
+                "index_bench_smoke",
+                [ROOT / "bench" / "index_bench.c"],
+                build_dir,
+                run_cwd=pathlib.Path(storage_cwd),
+                flags=["-pthread"],
+                required=[ROOT / "storage.c", ROOT / "bptree.c"],
+                args=["bench_smoke.sans", "2000", "50", "1", "1"],
             )
         compile_and_run(
             "execute_e01_e03",

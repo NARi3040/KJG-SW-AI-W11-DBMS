@@ -19,7 +19,7 @@ CLI·실행기 등 모듈별 실패 주입 테스트도 포함돼요. `test_harn
 | `bptree_test.c` | B+ 트리 단위 테스트 (차수 4·기본 512) |
 | `test_harness.py` | timeout 실패 보고, 컴파일러 탐색, 오류 원인·한 줄 stderr 검사 회귀 |
 | `test_server.py` | HTTP 서버(#21): 응답 JSON, 400·413, `Expect: 100-continue`, 동시 INSERT id 중복 없음, 강제 종료 뒤 재시작, 실행 인자 |
-| `run_tests.py` | 헤더, 기존 파서·저장 회귀 테스트, P/S, B+ 트리(차수 4·기본), 프로덕션 `bptree.c` 두 차수 검사, CLI/execute, 통합 테스트, 서버 테스트 |
+| `run_tests.py` | 헤더, 기존 파서·저장 회귀 테스트, P/S, B+ 트리(차수 4·기본), 프로덕션 `bptree.c` 두 차수 검사, 측정 프로그램 짧은 실행(`index_bench_smoke`, 2,000행), CLI/execute, 통합 테스트, 서버 테스트 |
 
 ## 의존성
 
