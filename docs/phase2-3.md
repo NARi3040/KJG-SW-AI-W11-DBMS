@@ -210,7 +210,7 @@ flowchart TD
 - 요청 본문은 SQL 원문 그대로예요([4.2절](#42-통신-방식-안건-6-a)). JSON으로 감싸지 않아요. 요청의 `Content-Type`은 검사하지 않고, 응답은 `Content-Type: application/json`이에요(추론).
 - 응답은 JSON이에요. 문장별 결과 목록이고, 오류면 문장 번호와 메시지를 담아요.
 - 문장을 실행하기 전에 거절하는 경우(요청 줄·헤더 오류 400, 413, 503)도 같은 모양의 JSON 본문을 보내요(추론). `results`는 빈 배열이고 `error`에 `statement`는 넣지 않아요. `category`는 `request`, `message`는 차례로 `malformed request`, `body too large`, `server busy`예요. 예: `{"ok":false,"results":[],"error":{"category":"request","message":"server busy"}}`
-- 요청 하나에 문장 여러 개를 허용해요. 지금 파서처럼 첫 오류에서 멈춰요. 트랜잭션이 없어서 오류 앞 문장은 이미 저장됐고, 응답의 `results`에 그 결과가 남아요.
+- 요청 하나에 문장 여러 개를 허용해요. 지금 파서처럼 첫 오류에서 멈춰요. 트랜잭션이 없어서 오류 앞 문장은 이미 저장됐고, 응답의 `results`에 그 결과가 남아요. 실패한 문장의 결과는 `results`에 넣지 않아요. SELECT가 중간에 실패하면(손상·읽기·콜백 오류) 그때까지 버퍼에 모은 행도 버려요.
 - JSON 이스케이프는 따옴표·역슬래시·제어 문자만 처리해요. UTF-8이 아닌 바이트는 다루지 않아요.
 - `category`와 `message`는 CLI와 같은 문자열을 써요. `main.c`의 `status_category()`·`status_cause()`는 `static`이라 서버에서 부를 수 없으므로, 두 함수를 `server.c`에 복사해요(추론). `main.c`와 `dbms.h`는 고치지 않아요.
   - `category`: `syntax`, `argument`, `schema`, `type`, `range`, `memory`, `io`, `corrupt`, `output`, `write-uncertain`.
@@ -428,7 +428,7 @@ DbStatus storage_find_by_id(Storage *storage, int64_t id,
 - DB 부분은 전역 뮤텍스 하나라 SELECT끼리도 차례로 실행돼요. 100만 행 name 조회(약 70ms) 동안 다른 요청은 기다려요(안건 9에서 따라 나온 것, 추론).
 - 요청 수신 시간 제한이 없어 연결만 열고 멈춘 클라이언트가 작업 스레드 하나를 붙잡아요.
 - WHERE 없는 SELECT는 전체 행을 한 응답으로 보내요.
-- 종료 처리 핸들러는 두지 않아요. 쓰기마다 `fflush`하고 헤더를 INSERT마다 갱신하므로 Ctrl+C로 꺼도 데이터와 다음 id는 남아요. INSERT 도중에 프로세스가 죽으면 "레코드 → 헤더" 순서 덕에 그 행만 없고 파일은 일관돼요. 전원이 꺼지는 경우는 보장하지 않아요([저장 설계 5.2절](storage.md#52-storage_insert)).
+- 종료 처리 핸들러는 두지 않아요. 쓰기마다 `fflush`하고 헤더를 INSERT마다 갱신하므로 Ctrl+C로 꺼도 데이터와 다음 id는 남아요. INSERT 도중에 프로세스가 죽으면 "레코드 → 헤더" 순서 덕에 파일은 일관돼요. 헤더를 쓰기 전에 죽으면 그 행만 없고, 쓴 뒤에 죽으면 그 행은 남아요. 응답을 받지 못한 클라이언트는 어느 쪽인지 알 수 없어요. 전원이 꺼지는 경우는 보장하지 않아요([저장 설계 5.2절](storage.md#52-storage_insert)).
 
 ## 9. 정하지 않은 것
 
