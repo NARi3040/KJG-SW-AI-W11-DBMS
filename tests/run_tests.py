@@ -43,6 +43,11 @@ def run(command, cwd=ROOT, timeout=TIMEOUT):
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            # Child output (e.g. index_bench's Korean table) is UTF-8. The
+            # locale default (cp949, cp1252) can fail to decode it, so never
+            # let decoding hide a result.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
