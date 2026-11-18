@@ -79,13 +79,21 @@ SELECT OK rows=2
 ../dbms ../../demo/phase1.sql
 ```
 
-③ 파일이 실제로 바이너리 형식인지 보여 줘요(PowerShell은 `Format-Hex users.sans | Select-Object -First 6`).
+③ 파일이 실제로 바이너리 형식인지 보여 줘요.
+
+Linux·Git Bash:
 
 ```bash
 xxd users.sans | head -6
 ```
 
-- 첫 줄의 `SANS`가 파일 표시이고, 그 뒤로 버전 1, 헤더 64바이트(`0x40`), 레코드 80바이트(`0x50`)예요.
+Windows PowerShell (`xxd`가 없어요. 다른 명령과 한 줄에 묶지 말고 이 줄만 실행해야 표 모양으로 나와요):
+
+```powershell
+Format-Hex users.sans | Select-Object -First 6
+```
+
+- 첫 줄의 `SANS`(`53 41 4E 53`)가 파일 표시이고, 그 뒤로 버전 1, 헤더 64바이트(`0x40`), 레코드 80바이트(`0x50`)예요.
 - 둘째 줄은 행 수 6과 다음 id 7이에요. `0x40`부터 첫 레코드 `id 1, age 23(0x17), kim`이 이어져요. 형식은 [저장 세부 설계 4장](docs/storage.md)에 있어요.
 
 ## 3. 결과: 인덱스로 id 조회 약 1만 배
