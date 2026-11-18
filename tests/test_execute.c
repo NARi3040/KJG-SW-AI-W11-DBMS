@@ -13,8 +13,11 @@
 typedef struct {
     int insert_calls;
     int scan_calls;
+    int find_calls;
     DbStatus insert_status;
     DbStatus scan_status;
+    DbStatus find_status;  /* 일치 행을 넘긴 뒤(없으면 끝에서) 돌려줘요 */
+    int64_t find_id;
     InsertResult insert_result;
     char name[DB_STRING_MAX + 1];
     int64_t age;
@@ -53,6 +56,7 @@ static void reset_fake(void) {
     memset(&fake, 0, sizeof fake);
     fake.insert_status = DB_OK;
     fake.scan_status = DB_OK;
+    fake.find_status = DB_OK;
     fake.fail_after = SIZE_MAX;
     fake.insert_result.id = 42;
     fake.insert_result.row_index = 7;
@@ -91,6 +95,32 @@ DbStatus storage_scan(Storage *storage, RowHandler on_row, void *user_data,
         (*out_count)++;
     }
     return fake.scan_status;
+}
+
+/* 실제 저장 모듈처럼 id가 같은 첫 행만 넘겨요. 순회 방식은 흉내 내지 않아요. */
+DbStatus storage_find_by_id(Storage *storage, int64_t id, RowHandler on_row,
+                            void *user_data, size_t *out_count) {
+    size_t i;
+
+    (void)storage;
+    fake.find_calls++;
+    fake.find_id = id;
+    fake.seen_handler = on_row;
+    fake.seen_user_data = user_data;
+    *out_count = 0;
+    for (i = 0; i < fake.row_count; i++) {
+        DbStatus status;
+        if (fake.rows[i].id != id) {
+            continue;
+        }
+        status = on_row(&fake.rows[i], user_data);
+        if (status != DB_OK) {
+            return status;
+        }
+        (*out_count)++;
+        break;
+    }
+    return fake.find_status;
 }
 
 static DbStatus record_row(const Row *row, void *user_data) {
@@ -380,6 +410,7 @@ static void test_select_no_where_e03(void) {
     CHECK(execute(fake_storage(), &command, NULL, &callback, &result) ==
           DB_ERR_ARG);
     CHECK(fake.scan_calls == 0);
+    CHECK(fake.find_calls == 0);
     CHECK(result_is_zero(&result));
 }
 
@@ -482,6 +513,11 @@ static void test_select_where_matches_and_zero(void) {
     memset(&callback, 0, sizeof callback);
     CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
           DB_OK);
+    CHECK(fake.find_calls == 1);
+    CHECK(fake.scan_calls == 0);
+    CHECK(fake.find_id == 3);
+    CHECK(fake.seen_handler == record_row);
+    CHECK(fake.seen_user_data == &callback);
     CHECK(callback.calls == 1);
     CHECK(callback.rows[0].id == 3);
     CHECK(result.row_count == 1);
@@ -519,6 +555,8 @@ static void test_select_where_boundaries(void) {
     poison(&result);
     CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
           DB_OK);
+    CHECK(fake.find_calls == 1);
+    CHECK(fake.find_id == INT64_MAX);
     CHECK(callback.calls == 1);
     CHECK(callback.rows[0].id == INT64_MAX);
     CHECK(result.row_count == 1);
@@ -530,6 +568,7 @@ static void test_select_where_boundaries(void) {
     CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
           DB_ERR_RANGE);
     CHECK(fake.scan_calls == 0);
+    CHECK(fake.find_calls == 0);
     CHECK(result_is_zero(&result));
 
     reset_fake();
@@ -561,6 +600,7 @@ static void test_select_where_validation_e02(void) {
     CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
           DB_ERR_RANGE);
     CHECK(fake.scan_calls == 0);
+    CHECK(fake.find_calls == 0);
     CHECK(result_is_zero(&result));
 
     command = make_select("users");
@@ -568,12 +608,14 @@ static void test_select_where_validation_e02(void) {
     CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
           DB_ERR_RANGE);
     CHECK(fake.scan_calls == 0);
+    CHECK(fake.find_calls == 0);
 
     command = make_select("users");
     set_where(&command, "id", string_value("7"));
     CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
           DB_ERR_TYPE);
     CHECK(fake.scan_calls == 0);
+    CHECK(fake.find_calls == 0);
 
     command = make_select("users");
     set_where(&command, "age", int_value((int64_t)INT32_MAX + 1));
@@ -640,6 +682,7 @@ static void test_select_where_validation_e02(void) {
     CHECK(execute(fake_storage(), &command, NULL, &callback, &result) ==
           DB_ERR_ARG);
     CHECK(fake.scan_calls == 0);
+    CHECK(fake.find_calls == 0);
     CHECK(result_is_zero(&result));
 }
 
@@ -738,6 +781,86 @@ static void test_select_failures_and_partial_counts(void) {
     CHECK(result.row_count == 2);
 }
 
+/* WHERE id는 storage_find_by_id 한 번으로 끝나고, 상태와 성공 행 수를 그대로
+ * 전달해요. name·age와 WHERE 없는 SELECT는 계속 scan을 써요. */
+static void test_select_where_id_uses_index(void) {
+    Command command;
+    CallbackState callback;
+    ExecuteResult result;
+
+    reset_fake();
+    fake.rows[0] = make_row(1, "Mina", 20);
+    fake.row_count = 1;
+    command = make_select("users");
+    set_where(&command, "id", int_value(2));
+    memset(&callback, 0, sizeof callback);
+    poison(&result);
+    CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
+          DB_OK);
+    CHECK(fake.find_calls == 1);
+    CHECK(fake.scan_calls == 0);
+    CHECK(callback.calls == 0);
+    CHECK(result.row_count == 0);
+
+    reset_fake();
+    fake.rows[0] = make_row(1, "Mina", 20);
+    fake.row_count = 1;
+    command = make_select("users");
+    set_where(&command, "ID", int_value(1));
+    memset(&callback, 0, sizeof callback);
+    callback.fail_on_call = 1;
+    callback.fail_status = DB_ERR_OUTPUT;
+    poison(&result);
+    CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
+          DB_ERR_OUTPUT);
+    CHECK(fake.find_calls == 1);
+    CHECK(callback.calls == 1);
+    CHECK(result.row_count == 0);
+
+    reset_fake();
+    fake.rows[0] = make_row(1, "Mina", 20);
+    fake.row_count = 1;
+    fake.find_status = DB_ERR_IO;
+    command = make_select("users");
+    set_where(&command, "id", int_value(1));
+    memset(&callback, 0, sizeof callback);
+    poison(&result);
+    CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
+          DB_ERR_IO);
+    CHECK(callback.calls == 1);
+    CHECK(result.row_count == 1);
+
+    reset_fake();
+    fake.find_status = DB_ERR_CORRUPT;
+    command = make_select("users");
+    set_where(&command, "id", int_value(5));
+    memset(&callback, 0, sizeof callback);
+    poison(&result);
+    CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
+          DB_ERR_CORRUPT);
+    CHECK(callback.calls == 0);
+    CHECK(result.row_count == 0);
+
+    reset_fake();
+    fake.rows[0] = make_row(1, "Mina", 20);
+    fake.row_count = 1;
+    command = make_select("users");
+    set_where(&command, "name", string_value("Mina"));
+    memset(&callback, 0, sizeof callback);
+    CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
+          DB_OK);
+    CHECK(fake.scan_calls == 1);
+    CHECK(fake.find_calls == 0);
+
+    reset_fake();
+    command = make_select("users");
+    memset(&callback, 0, sizeof callback);
+    CHECK(execute(fake_storage(), &command, record_row, &callback, &result) ==
+          DB_OK);
+    CHECK(fake.scan_calls == 1);
+    CHECK(fake.find_calls == 0);
+}
+
 static void test_insert_storage_errors(void) {
     Command command = make_insert("Mina", 20);
     CallbackState callback;
@@ -771,6 +894,7 @@ int main(void) {
     test_select_where_boundaries();
     test_select_where_validation_e02();
     test_select_failures_and_partial_counts();
+    test_select_where_id_uses_index();
     test_insert_storage_errors();
 
     if (failures != 0) {

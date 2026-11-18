@@ -15,7 +15,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TESTS = ROOT / "tests"
-SOURCES = ("main.c", "parser.c", "execute.c", "storage.c")
+SOURCES = ("main.c", "parser.c", "execute.c", "storage.c", "bptree.c")
 CFLAGS = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(ROOT)]
 RESULTS = []
 GCC = None
@@ -66,8 +66,10 @@ def missing(name, paths):
     record(name, "MISSING", f"missing {names}")
 
 
-def compile_and_run(name, sources, build_dir, run_cwd=None):
-    absent = [path for path in sources if not path.is_file()]
+def compile_and_run(name, sources, build_dir, run_cwd=None, flags=(), required=()):
+    # required: files that must exist but are not linked (e.g. a module the
+    # test includes directly).
+    absent = [path for path in (*sources, *required) if not path.is_file()]
     if absent:
         missing(name, absent)
         return
@@ -76,7 +78,7 @@ def compile_and_run(name, sources, build_dir, run_cwd=None):
         return
 
     exe = build_dir / (name + (".exe" if os.name == "nt" else ""))
-    command = [GCC, *CFLAGS, *sources, "-o", exe]
+    command = [GCC, *CFLAGS, *flags, *sources, "-o", exe]
     print("[RUN] " + " ".join(str(part) for part in command))
     compiled = run(command)
     if compiled.returncode != 0:
@@ -94,6 +96,26 @@ def compile_and_run(name, sources, build_dir, run_cwd=None):
             name,
             "FAIL",
             f"run exit {executed.returncode}\n{executed.stdout}{executed.stderr}",
+        )
+    else:
+        record(name, "PASS")
+
+
+def syntax_check(name, source, flags=()):
+    if not source.is_file():
+        missing(name, [source])
+        return
+    if GCC is None:
+        record(name, "MISSING", "gcc not found; set GCC to a valid compiler")
+        return
+    command = [GCC, *CFLAGS, *flags, "-fsyntax-only", source]
+    print("[RUN] " + " ".join(str(part) for part in command))
+    result = run(command)
+    if result.returncode != 0:
+        record(
+            name,
+            "FAIL",
+            f"exit {result.returncode}\n{result.stdout}{result.stderr}",
         )
     else:
         record(name, "PASS")
@@ -130,26 +152,11 @@ def main():
         build_dir = pathlib.Path(build_dir)
 
         header = TESTS / "header_contract.c"
-        if not header.is_file():
-            missing("header_contract", [header])
-        elif GCC is None:
-            record(
-                "header_contract",
-                "MISSING",
-                "gcc not found; set GCC to a valid compiler",
-            )
-        else:
-            command = [GCC, *CFLAGS, "-fsyntax-only", header]
-            print("[RUN] " + " ".join(str(part) for part in command))
-            result = run(command)
-            if result.returncode != 0:
-                record(
-                    "header_contract",
-                    "FAIL",
-                    f"exit {result.returncode}\n{result.stdout}{result.stderr}",
-                )
-            else:
-                record("header_contract", "PASS")
+        syntax_check("header_contract", header)
+
+        bptree = ROOT / "bptree.c"
+        syntax_check("bptree_production_order4", bptree, flags=["-DBPTREE_ORDER=4"])
+        syntax_check("bptree_production_default", bptree)
 
         compile_and_run(
             "parser_p01_p02",
@@ -164,13 +171,13 @@ def main():
         with tempfile.TemporaryDirectory(prefix="dbms_storage_") as storage_cwd:
             compile_and_run(
                 "storage_regression",
-                [TESTS / "storage_test.c"],
+                [TESTS / "storage_test.c", ROOT / "bptree.c"],
                 build_dir,
                 run_cwd=pathlib.Path(storage_cwd),
             )
             compile_and_run(
                 "storage_s01_s02",
-                [ROOT / "storage.c", TESTS / "test_storage_contract.c"],
+                [ROOT / "storage.c", ROOT / "bptree.c", TESTS / "test_storage_contract.c"],
                 build_dir,
                 run_cwd=pathlib.Path(storage_cwd),
             )
@@ -178,6 +185,22 @@ def main():
             "execute_e01_e03",
             [ROOT / "execute.c", TESTS / "test_execute.c"],
             build_dir,
+        )
+
+        # bptree_test.c defines BPTREE_TESTING and includes bptree.c itself;
+        # bptree.c is required but must not be linked a second time.
+        compile_and_run(
+            "bptree_order4",
+            [TESTS / "bptree_test.c"],
+            build_dir,
+            flags=["-DBPTREE_ORDER=4"],
+            required=[ROOT / "bptree.c"],
+        )
+        compile_and_run(
+            "bptree_default",
+            [TESTS / "bptree_test.c"],
+            build_dir,
+            required=[ROOT / "bptree.c"],
         )
 
         run_python(

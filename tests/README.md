@@ -1,7 +1,7 @@
 # 테스트 (이슈 #9)
 
-실제 모듈을 쓰는 SQL 통합 테스트와 최소 파서·저장 단위 테스트예요.
-전체 러너는 파서·저장·CLI·실행기와 각 모듈의 회귀 테스트도 함께 검증해요.
+실제 모듈을 쓰는 SQL 통합 테스트와 최소 파서·저장·B+ 트리 단위 테스트예요.
+전체 러너는 파서·저장·B+ 트리·CLI·실행기와 각 모듈의 회귀 테스트도 함께 검증해요.
 필수 구현이나 테스트가 빠졌다면 `run_tests.py`는 누락 항목을 보고하고 0이 아닌 코드로 끝나요.
 가짜 구현이나 테스트 건너뛰기를 전체 통과로 처리하지 않아요.
 
@@ -16,17 +16,22 @@ CLI·실행기 등 모듈별 실패 주입 테스트도 포함돼요. `test_harn
 | `test_integration.py` | `docs/test.md` 01~18, CLI 인자·빈 입력·128MiB 경계 |
 | `test_parser_contract.c` | P01 INSERT/WHERE SELECT, P02 문법 오류·커서·출력 초기화 계약 |
 | `test_storage_contract.c` | S01 빈 스캔→2행 저장→재스캔, S02 close/reopen 후 1행 추가 |
+| `bptree_test.c` | B+ 트리 단위 테스트 (차수 4·기본 512) |
 | `test_harness.py` | timeout 실패 보고, 컴파일러 탐색, 오류 원인·한 줄 stderr 검사 회귀 |
 | `test_server.py` | HTTP 서버(#21): 응답 JSON, 400·413, `Expect: 100-continue`, 동시 INSERT id 중복 없음, 강제 종료 뒤 재시작, 실행 인자 |
-| `run_tests.py` | 헤더, 기존 파서·저장 회귀 테스트, P/S, CLI/execute, 통합 테스트 |
+| `run_tests.py` | 헤더, 기존 파서·저장 회귀 테스트, P/S, B+ 트리(차수 4·기본), 프로덕션 `bptree.c` 두 차수 검사, CLI/execute, 통합 테스트, 서버 테스트 |
 
 ## 의존성
 
 - Python 3.10+ 표준 라이브러리만 사용
 - `gcc` (C11). `GCC`로 명령명이나 경로를 지정하고, 미지정 시 PATH의 `gcc`를 사용해요.
 - 통합 테스트는 `DBMS_EXE`로 실제 실행 파일을 받거나, 저장소 루트의
-  `main.c`·`parser.c`·`execute.c`·`storage.c`를 임시 디렉터리에서 빌드해요.
-- 단위 테스트는 각각 `parser.c`, `storage.c`, `execute.c`가 필요해요.
+  `main.c`·`parser.c`·`execute.c`·`storage.c`·`bptree.c`를 임시 디렉터리에서 빌드해요.
+- 단위 테스트는 각각 `parser.c`, `storage.c`(+`bptree.c`), `execute.c`가 필요해요.
+  B+ 트리 테스트는 `bptree.c`가 필요해요.
+- `bptree_test.c`는 `BPTREE_TESTING`을 정의한 뒤 `bptree.c`를 직접 포함해요.
+  그래서 러너는 `bptree.c`를 존재 확인용으로만 넣고 테스트 빌드에 따로 링크하지 않아요.
+  저장 테스트는 반대로 `storage.c`를 포함하거나 링크하면서 `bptree.c`를 같이 링크해요.
 - PR #13(CLI와 CLI 대역 테스트)·#14(실행기와 E01~E03)는 `main`에 병합되었고
   이 브랜치에도 반영됐어요. 병합 전 전체 러너가 누락 없이 통과해야 해요.
   해당 테스트를 중복 작성하거나 누락을 성공으로 처리하지 않아요.
@@ -71,8 +76,18 @@ gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . parser.c tests/test_parser_con
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . execute.c tests/test_execute.c -o execute_test
 ./execute_test
 
+# B+ 트리: 테스트가 bptree.c를 직접 포함하므로 bptree.c를 따로 링크하지 않아요
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . -DBPTREE_ORDER=4 tests/bptree_test.c -o bptree_order4
+./bptree_order4
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . tests/bptree_test.c -o bptree_default
+./bptree_default
+
+# 프로덕션 bptree.c만 두 차수로 문법·경고 검사 (BPTREE_TESTING 없음)
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . -fsyntax-only bptree.c
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . -DBPTREE_ORDER=4 -fsyntax-only bptree.c
+
 # 저장 테스트는 빈 임시 디렉터리를 cwd로 실행해야 해요 (상대 경로 users.sans)
-gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . storage.c tests/test_storage_contract.c -o storage_test
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . storage.c bptree.c tests/test_storage_contract.c -o storage_test
 tmp=$(mktemp -d) && (cd "$tmp" && /absolute/path/to/storage_test)
 
 # 서버 테스트: server.c와 모듈을 임시 디렉터리에서 -pthread로 빌드해 빈 포트에 띄워요
