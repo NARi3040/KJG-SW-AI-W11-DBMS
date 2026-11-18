@@ -188,6 +188,10 @@ class ServerTest(unittest.TestCase):
         status, _, body = self.server.post(" " * (1 << 20))
         self.assertEqual((status, body), (200, {"ok": True, "results": []}))
 
+    def test_body_over_1mib_without_expect_is_413(self):
+        request = b"POST /query HTTP/1.1\r\nContent-Length: 1048577\r\n\r\n" + b" " * 1048577
+        self.assertEqual(self.server.raw(request)[0], 413)
+
     def test_expect_continue_gets_100_then_result(self):
         body = b"SELECT * FROM users;"
         with socket.create_connection(("127.0.0.1", self.server.port), timeout=10) as sock:
@@ -224,13 +228,74 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(body["results"][0]["rows"]), total)
 
     def test_kill_and_restart_keeps_rows_and_next_id(self):
-        self.server.post("INSERT INTO users VALUES ('a', 1); INSERT INTO users VALUES ('b', 2);")
+        status, _, _ = self.server.post(
+            "INSERT INTO users VALUES ('a', 1); INSERT INTO users VALUES ('b', 2);")
+        self.assertEqual(status, 200)
         self.server.stop()
         self.server = ServerProcess(self.exe, self.data_dir.name, "--threads", "2")
         status, _, body = self.server.post("INSERT INTO users VALUES ('c', 3); SELECT * FROM users;")
         self.assertEqual(status, 200)
         self.assertEqual(body["results"][0], {"type": "insert", "id": 3})
         self.assertEqual([row["name"] for row in body["results"][1]["rows"]], ["a", "b", "c"])
+
+    def test_failed_select_drops_partial_rows_and_is_500(self):
+        status, _, _ = self.server.post("".join(
+            f"INSERT INTO users VALUES ('r{i}', {i});" for i in range(3)))
+        self.assertEqual(status, 200)
+        self.server.stop()
+        path = pathlib.Path(self.data_dir.name) / "users.sans"
+        data = bytearray(path.read_bytes())
+        data[64 + 80 * 2] ^= 0xFF  # third record's id no longer matches its position
+        path.write_bytes(bytes(data))
+        self.server = ServerProcess(self.exe, self.data_dir.name, "--threads", "2")
+        status, _, body = self.server.post("INSERT INTO users VALUES ('d', 4); SELECT * FROM users;")
+        self.assertEqual(status, 500)
+        self.assertEqual(body["results"], [{"type": "insert", "id": 4}])
+        self.assertEqual(body["error"]["statement"], 2)
+        self.assertEqual(body["error"]["category"], "corrupt")
+
+    def test_unread_large_select_does_not_block_other_requests(self):
+        # Rows are buffered and sent after the lock is released (4.6), so a client
+        # that never reads a big response must not stall a later id lookup.
+        name = "n" * 64
+        for start in range(0, 60000, 10000):
+            status, _, _ = self.server.post("".join(
+                f"INSERT INTO users VALUES ('{name}', {i});" for i in range(start, start + 10000)))
+            self.assertEqual(status, 200)
+        stalled = socket.socket()
+        stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        stalled.connect(("127.0.0.1", self.server.port))
+        try:
+            body = b"SELECT * FROM users;"
+            stalled.sendall(b"POST /query HTTP/1.1\r\nContent-Length: %d\r\n\r\n" % len(body)
+                            + body)
+            time.sleep(1)  # let the SELECT finish and block in send()
+            started = time.monotonic()
+            status, _, reply = self.server.post("SELECT * FROM users WHERE id = 1;")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(reply["results"][0]["rows"]), 1)
+            self.assertLess(time.monotonic() - started, 5)
+        finally:
+            stalled.close()
+
+    def test_full_queue_gets_503(self):
+        busy = {"ok": False, "results": [],
+                "error": {"category": "request", "message": "server busy"}}
+        small = ServerProcess(self.exe, self.data_dir.name, "--threads", "1", "--queue", "1")
+        held = []
+        try:
+            for _ in range(2):  # one blocks the only worker, one fills the queue
+                sock = socket.create_connection(("127.0.0.1", small.port), timeout=10)
+                sock.sendall(b"POST /query HTTP/1.1\r\n")
+                held.append(sock)
+                time.sleep(0.3)
+            for _ in range(5):
+                self.assertEqual(small.raw(
+                    b"POST /query HTTP/1.1\r\nContent-Length: 1\r\n\r\n;"), (503, busy))
+        finally:
+            for sock in held:
+                sock.close()
+            small.stop()
 
     def test_bad_arguments_exit_1_with_usage(self):
         for args in (["--threads", "0"], ["--threads", "257"], ["--port", "abc"],

@@ -33,4 +33,6 @@ gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread server.c parser.c execute.
 # Windows MinGW-w64: 끝에 -static -lws2_32
 ./dbms_server --port 8080 --threads 4
 curl -s -X POST --data-binary "INSERT INTO users VALUES ('kim', 23); SELECT * FROM users;" http://127.0.0.1:8080/query
-``` 전체 테스트의 범위와 의존성은 [`tests/README.md`](tests/README.md)에서 안내합니다. `make test`는 전체 테스트가 아니라 파서 단위 테스트만 실행합니다.
+```
+
+전체 테스트의 범위와 의존성은 [`tests/README.md`](tests/README.md)에서 안내합니다. `make test`는 전체 테스트가 아니라 파서 단위 테스트만 실행합니다.

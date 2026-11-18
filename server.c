@@ -23,6 +23,8 @@ typedef SOCKET Socket;
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 typedef int Socket;
 #define SOCKET_NONE (-1)
@@ -44,6 +46,8 @@ typedef int Socket;
 #define BODY_MAX ((size_t)1 << 20)    /* 1 MiB */
 #define HEADER_MAX 8192               /* 요청 줄과 헤더를 합친 최대 바이트 */
 #define DRAIN_MAX (BODY_MAX * 4)      /* 거절한 요청에서 읽고 버릴 최대 바이트 */
+#define DRAIN_TIMEOUT_MS 1000         /* 버리며 읽을 때 한 번 기다리는 최대 시간 */
+#define REJECT_MAX 64                 /* 503을 보내려고 기다릴 수 있는 연결 수 */
 
 #define NOMEM_BODY "{\"ok\":false,\"results\":[],\"error\":{\"category\":\"memory\"," \
                    "\"message\":\"out of memory\"}}"
@@ -79,6 +83,7 @@ typedef enum {
 static pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
 static Storage *server_storage;
 static Queue queue;
+static Queue reject_queue; /* 대기열이 가득 찼을 때 503을 보낼 연결 */
 
 /* ---------- CLI와 같은 오류 문구 (main.c에서 복사) ---------- */
 
@@ -280,7 +285,7 @@ static int run_sql(Storage *storage, const char *sql, size_t length, Buffer *out
             }
         } else {
             pthread_mutex_lock(&db_lock);
-            status = execute(storage, &command, append_row, NULL, &result);
+            status = execute(storage, &command, NULL, NULL, &result);
             pthread_mutex_unlock(&db_lock);
             if (status == DB_OK && (!buffer_text(&results, "{\"type\":\"insert\",\"id\":") ||
                                     !buffer_int(&results, result.insert.id) ||
@@ -394,6 +399,19 @@ static void send_request_error(Socket socket, int status, const char *message) {
     }
 }
 
+/* 버리며 읽을 때 멈춘 클라이언트가 스레드를 오래 붙잡지 않게 해요. */
+static void set_receive_timeout(Socket socket, int milliseconds) {
+#ifdef _WIN32
+    DWORD timeout = (DWORD)milliseconds;
+#else
+    struct timeval timeout;
+
+    timeout.tv_sec = milliseconds / 1000;
+    timeout.tv_usec = (milliseconds % 1000) * 1000;
+#endif
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+}
+
 /* 읽지 않은 본문이 남은 채 닫으면 RST로 응답이 사라질 수 있어 조금 읽고 버려요. */
 static void drain_and_close(Socket socket) {
     char scrap[4096];
@@ -401,6 +419,7 @@ static void drain_and_close(Socket socket) {
     long received;
 
     shutdown(socket, SOCKET_SHUT_WRITE);
+    set_receive_timeout(socket, DRAIN_TIMEOUT_MS);
     while (drained < DRAIN_MAX && (received = socket_recv(socket, scrap, sizeof scrap)) > 0) {
         drained += (size_t)received;
     }
@@ -482,6 +501,7 @@ static const char *find_header_end(const char *data, size_t length) {
 static RequestStatus read_request(Socket socket, char **out_body, size_t *out_length) {
     char header[HEADER_MAX];
     size_t received = 0;
+    size_t searched;
     const char *header_end = NULL;
     const char *line;
     const char *line_end;
@@ -502,8 +522,10 @@ static RequestStatus read_request(Socket socket, char **out_body, size_t *out_le
         if (n <= 0) {
             return REQUEST_GONE;
         }
+        /* 앞에서 본 바이트는 다시 찾지 않아요. 경계에 걸친 3바이트만 다시 봐요. */
+        searched = received > 3 ? received - 3 : 0;
         received += (size_t)n;
-        header_end = find_header_end(header, received);
+        header_end = find_header_end(header + searched, received - searched);
     }
 
     line = header;
@@ -651,6 +673,44 @@ static void *worker_main(void *arg) {
     return NULL;
 }
 
+/* 요청을 읽지 않고 닫으면 클라이언트가 503 대신 RST를 볼 수 있어, 작업 스레드와
+ * 메인 스레드를 막지 않는 별도 스레드가 503을 보내고 남은 요청을 읽고 버려요. */
+static void *reject_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        Socket socket = queue_pop(&reject_queue);
+
+        send_request_error(socket, 503, "server busy");
+        drain_and_close(socket);
+    }
+    return NULL;
+}
+
+static int queue_init(Queue *q, size_t capacity) {
+    q->items = malloc(capacity * sizeof *q->items);
+    q->capacity = capacity;
+    q->head = 0;
+    q->count = 0;
+    if (q->items == NULL) {
+        return 0;
+    }
+    if (pthread_mutex_init(&q->lock, NULL) != 0) {
+        return 0;
+    }
+    return pthread_cond_init(&q->ready, NULL) == 0;
+}
+
+/* accept가 EMFILE 같은 이유로 계속 실패할 때 CPU를 다 쓰지 않게 잠깐 쉬어요. */
+static void pause_after_accept_error(void) {
+#ifdef _WIN32
+    Sleep(10);
+#else
+    struct timespec pause = {0, 10 * 1000 * 1000};
+
+    nanosleep(&pause, NULL);
+#endif
+}
+
 /* ---------- 실행 인자와 시작 ---------- */
 
 /* 부호·공백 없는 10진수이고 [min, max] 안이면 1이에요. */
@@ -776,19 +836,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    queue.items = malloc((size_t)capacity * sizeof *queue.items);
-    queue.capacity = (size_t)capacity;
-    if (queue.items == NULL || pthread_mutex_init(&queue.lock, NULL) != 0 ||
-        pthread_cond_init(&queue.ready, NULL) != 0) {
-        fprintf(stderr, "start: out of memory\n");
+    if (!queue_init(&queue, (size_t)capacity) || !queue_init(&reject_queue, REJECT_MAX)) {
+        fprintf(stderr, "start: cannot create request queue\n");
         socket_close(listener);
         storage_close(server_storage);
         return 1;
     }
-    for (i = 0; i < threads; i++) {
+    for (i = 0; i <= threads; i++) {
         pthread_t thread;
 
-        if (pthread_create(&thread, NULL, worker_main, NULL) != 0) {
+        /* 마지막 하나는 503 전송 스레드예요. */
+        if (pthread_create(&thread, NULL, i < threads ? worker_main : reject_main, NULL) != 0) {
             /* 만든 스레드는 대기열에서 기다리기만 해서 저장소를 닫아도 안전해요. */
             fprintf(stderr, "start: cannot create worker thread\n");
             socket_close(listener);
@@ -808,12 +866,11 @@ int main(int argc, char *argv[]) {
         Socket client = accept(listener, NULL, NULL);
 
         if (client == SOCKET_NONE) {
+            pause_after_accept_error();
             continue;
         }
-        if (!queue_push(&queue, client)) {
-            /* shortcut: 요청을 읽지 않고 닫아 클라이언트가 503 대신 RST를 볼 수 있음,
-             * 문제가 되면 503 전송을 작업 스레드 밖의 별도 스레드로 옮김. */
-            send_request_error(client, 503, "server busy");
+        if (!queue_push(&queue, client) && !queue_push(&reject_queue, client)) {
+            /* shortcut: 503 대기열까지 차면 응답 없이 닫음, 부하 측정에서 자주 보이면 REJECT_MAX를 늘림. */
             socket_close(client);
         }
     }
