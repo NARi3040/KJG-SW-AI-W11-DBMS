@@ -18,7 +18,8 @@ CLI·실행기 등 모듈별 실패 주입 테스트도 포함돼요. `test_harn
 | `test_storage_contract.c` | S01 빈 스캔→2행 저장→재스캔, S02 close/reopen 후 1행 추가 |
 | `bptree_test.c` | B+ 트리 단위 테스트 (차수 4·기본 512) |
 | `test_harness.py` | timeout 실패 보고, 컴파일러 탐색, 오류 원인·한 줄 stderr 검사 회귀 |
-| `run_tests.py` | 헤더, 기존 파서·저장 회귀 테스트, P/S, B+ 트리(차수 4·기본), 프로덕션 `bptree.c` 두 차수 검사, 측정 프로그램 짧은 실행(`index_bench_smoke`, 2,000행), CLI/execute, 통합 테스트 |
+| `test_server.py` | HTTP 서버(#21): 응답 JSON, 400·413, `Expect: 100-continue`, 동시 INSERT id 중복 없음, 강제 종료 뒤 재시작, 실행 인자 |
+| `run_tests.py` | 헤더, 기존 파서·저장 회귀 테스트, P/S, B+ 트리(차수 4·기본), 프로덕션 `bptree.c` 두 차수 검사, 측정 프로그램 짧은 실행(`index_bench_smoke`, 2,000행), CLI/execute, 통합 테스트, 서버 테스트 |
 
 ## 의존성
 
@@ -88,6 +89,9 @@ gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . -DBPTREE_ORDER=4 -fsyntax-only
 # 저장 테스트는 빈 임시 디렉터리를 cwd로 실행해야 해요 (상대 경로 users.sans)
 gcc -std=c11 -Wall -Wextra -Werror -pedantic -I . storage.c bptree.c tests/test_storage_contract.c -o storage_test
 tmp=$(mktemp -d) && (cd "$tmp" && /absolute/path/to/storage_test)
+
+# 서버 테스트: server.c와 모듈을 임시 디렉터리에서 -pthread로 빌드해 빈 포트에 띄워요
+python tests/test_server.py -v
 
 # 통합 테스트: 소스가 있으면 자동 빌드, 없으면 DBMS_EXE 지정
 python tests/test_integration.py -v

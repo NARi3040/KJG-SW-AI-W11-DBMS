@@ -223,6 +223,12 @@ def main():
             [ROOT / "main.c", TESTS / "test_cli.py", TESTS / "cli_stubs.c"],
         )
 
+        run_python(
+            "server_tests",
+            TESTS / "test_server.py",
+            [ROOT / "server.c", TESTS / "test_server.py"],
+        )
+
         integration = TESTS / "test_integration.py"
         if not integration.is_file():
             missing("sql_integration", [integration])
