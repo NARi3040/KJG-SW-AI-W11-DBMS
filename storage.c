@@ -438,7 +438,7 @@ DbStatus storage_insert(Storage *storage, const char *name, int64_t age,
     storage->row_count = row_index + 1;
     storage->next_id = id + 1;
 
-    /* 6단계: 행은 이미 저장됐어요. 트리에 못 넣으면 인덱스를 버리고 이후 id
+    /* 7단계: 행은 이미 저장됐어요. 트리에 못 넣으면 인덱스를 버리고 이후 id
      * 조회는 전체 순회로 찾아요. 결과는 늘 맞으므로 INSERT는 성공이에요. */
     if (storage->index != NULL &&
         bptree_insert(storage->index, id, row_index) != DB_OK) {
