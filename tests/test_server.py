@@ -168,7 +168,7 @@ class ServerTest(unittest.TestCase):
         cases = [
             b"GET /query HTTP/1.1\r\nHost: x\r\n\r\n",
             b"POST /other HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
-            b"POST /query HTTP/1.1\r\nHost: x\r\n\r\n",
+            b"POST /query HTTP/1.1\r\nX-Other: 1\r\n\r\n",  # no Content-Length
             b"POST /query HTTP/1.1\r\nContent-Length: 1x\r\n\r\nx",
             b"POST /query HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx",
             b"POST /query HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
@@ -177,6 +177,27 @@ class ServerTest(unittest.TestCase):
         for request in cases:
             with self.subTest(request=request[:40]):
                 self.assertEqual(self.server.raw(request), (400, malformed))
+
+    def test_browser_requests_are_403(self):
+        forbidden = {"ok": False, "results": [],
+                     "error": {"category": "request", "message": "forbidden"}}
+        body = b"INSERT INTO users VALUES ('csrf', 1);"
+        port = self.server.port
+        for headers in (b"Origin: http://evil.example\r\n",
+                        b"Origin: null\r\n",
+                        b"Host: evil.example:%d\r\n" % port,
+                        b"Host: 127.0.0.1:%d\r\n" % (port + 1)):
+            with self.subTest(headers=headers):
+                request = (b"POST /query HTTP/1.1\r\n" + headers +
+                           b"Content-Length: %d\r\n\r\n" % len(body) + body)
+                self.assertEqual(self.server.raw(request), (403, forbidden))
+        for host in (b"127.0.0.1:%d" % port, b"LOCALHOST:%d" % port):
+            with self.subTest(host=host):
+                request = (b"POST /query HTTP/1.1\r\nHost: " + host +
+                           b"\r\nContent-Length: 1\r\n\r\n;")
+                self.assertEqual(self.server.raw(request)[0], 200)
+        status, _, reply = self.server.post("SELECT * FROM users;")
+        self.assertEqual(reply["results"][0]["rows"], [])  # nothing was inserted
 
     def test_body_over_1mib_is_413(self):
         too_large = {"ok": False, "results": [],

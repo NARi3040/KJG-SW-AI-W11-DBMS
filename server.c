@@ -76,6 +76,7 @@ typedef enum {
     REQUEST_OK,
     REQUEST_BAD,
     REQUEST_TOO_LARGE,
+    REQUEST_FORBIDDEN, /* 브라우저에서 온 요청(CSRF 방어) */
     REQUEST_NOMEM,
     REQUEST_GONE /* 응답할 수 없음: 연결이 끊기거나 읽기 실패 */
 } RequestStatus;
@@ -84,6 +85,7 @@ static pthread_mutex_t db_lock = PTHREAD_MUTEX_INITIALIZER;
 static Storage *server_storage;
 static Queue queue;
 static Queue reject_queue; /* 대기열이 가득 찼을 때 503을 보낼 연결 */
+static char allowed_hosts[2][32]; /* "127.0.0.1:<포트>", "localhost:<포트>" */
 
 /* ---------- CLI와 같은 오류 문구 (main.c에서 복사) ---------- */
 
@@ -365,6 +367,7 @@ static const char *reason_phrase(int status) {
     switch (status) {
     case 200: return "OK";
     case 400: return "Bad Request";
+    case 403: return "Forbidden";
     case 413: return "Payload Too Large";
     case 503: return "Service Unavailable";
     default: return "Internal Server Error";
@@ -523,6 +526,7 @@ static RequestStatus read_request(Socket socket, char **out_body, size_t *out_le
     int has_length = 0;
     int too_large = 0;
     int expect_continue = 0;
+    int forbidden = 0;
     size_t leftover;
     char *body;
 
@@ -574,7 +578,25 @@ static RequestStatus read_request(Socket socket, char **out_body, size_t *out_le
 
             trim_value(&value, &value_end);
             expect_continue = ascii_equals(value, (size_t)(value_end - value), "100-continue");
+        } else if (ascii_equals(line, (size_t)(colon - line), "origin")) {
+            /* 브라우저는 POST에 Origin을 붙이고 curl·Python 클라이언트는 붙이지 않아요. */
+            forbidden = 1;
+        } else if (ascii_equals(line, (size_t)(colon - line), "host")) {
+            /* DNS 리바인딩으로 들어온 요청은 Host가 다른 이름이에요. */
+            const char *value = colon + 1;
+            const char *value_end = line_end;
+            size_t length;
+
+            trim_value(&value, &value_end);
+            length = (size_t)(value_end - value);
+            if (!ascii_equals(value, length, allowed_hosts[0]) &&
+                !ascii_equals(value, length, allowed_hosts[1])) {
+                forbidden = 1;
+            }
         }
+    }
+    if (forbidden) {
+        return REQUEST_FORBIDDEN;
     }
     if (!has_length) {
         return REQUEST_BAD;
@@ -632,6 +654,10 @@ static void handle_client(Socket socket) {
         break;
     case REQUEST_BAD:
         send_request_error(socket, 400, "malformed request");
+        drain_and_close(socket);
+        break;
+    case REQUEST_FORBIDDEN:
+        send_request_error(socket, 403, "forbidden");
         drain_and_close(socket);
         break;
     case REQUEST_TOO_LARGE:
@@ -843,6 +869,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    snprintf(allowed_hosts[0], sizeof allowed_hosts[0], "127.0.0.1:%ld", port);
+    snprintf(allowed_hosts[1], sizeof allowed_hosts[1], "localhost:%ld", port);
     listener = open_listener(port);
     if (listener == SOCKET_NONE) {
         fprintf(stderr, "start: cannot listen on 127.0.0.1:%ld\n", port);
