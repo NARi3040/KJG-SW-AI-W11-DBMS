@@ -19,9 +19,7 @@ import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-# bptree.c joins the build once #18/#19 add it; until then it does not exist.
-SOURCES = [name for name in ("server.c", "parser.c", "execute.c", "storage.c", "bptree.c")
-           if name != "bptree.c" or (ROOT / name).is_file()]
+SOURCES = ["server.c", "parser.c", "execute.c", "storage.c", "bptree.c"]
 CFLAGS = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-pthread"]
 BUILD_TIMEOUT = 300
 START_TIMEOUT = 10

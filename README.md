@@ -29,7 +29,7 @@ SQL 파일은 `./dbms input.sql`로 실행합니다(Windows에서는 `.\dbms.exe
 API 서버는 `127.0.0.1`에서 `POST /query`로 SQL을 받아 JSON으로 돌려줍니다. 실행 인자와 응답 형식은 [Phase 2·3 계획 4장](docs/phase2-3.md#4-phase-3-api-서버)에 있습니다.
 
 ```bash
-gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread server.c parser.c execute.c storage.c -o dbms_server
+gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread server.c parser.c execute.c storage.c bptree.c -o dbms_server
 # Windows MinGW-w64: 끝에 -static -lws2_32
 ./dbms_server --port 8080 --threads 4
 curl -s -X POST --data-binary "INSERT INTO users VALUES ('kim', 23); SELECT * FROM users;" http://127.0.0.1:8080/query
