@@ -15,7 +15,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TESTS = ROOT / "tests"
-SOURCES = ("main.c", "parser.c", "execute.c", "storage.c")
+SOURCES = ("main.c", "parser.c", "execute.c", "storage.c", "bptree.c")
 CFLAGS = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(ROOT)]
 RESULTS = []
 GCC = None
@@ -171,13 +171,13 @@ def main():
         with tempfile.TemporaryDirectory(prefix="dbms_storage_") as storage_cwd:
             compile_and_run(
                 "storage_regression",
-                [TESTS / "storage_test.c"],
+                [TESTS / "storage_test.c", ROOT / "bptree.c"],
                 build_dir,
                 run_cwd=pathlib.Path(storage_cwd),
             )
             compile_and_run(
                 "storage_s01_s02",
-                [ROOT / "storage.c", TESTS / "test_storage_contract.c"],
+                [ROOT / "storage.c", ROOT / "bptree.c", TESTS / "test_storage_contract.c"],
                 build_dir,
                 run_cwd=pathlib.Path(storage_cwd),
             )

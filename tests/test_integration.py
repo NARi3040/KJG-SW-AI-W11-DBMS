@@ -1,12 +1,13 @@
 """Real SQL integration tests for docs/test.md 01-18 and CLI input cases.
 
 Run with a real executable via DBMS_EXE, or with all of main.c, parser.c,
-execute.c, and storage.c present so this harness can build a temporary binary.
+execute.c, storage.c, and bptree.c present so this harness can build a temporary binary.
 Missing prerequisites fail loudly; tests are never skipped as success.
 """
 
 import os
 import pathlib
+import random
 import re
 import shutil
 import subprocess
@@ -14,7 +15,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SOURCES = ("main.c", "parser.c", "execute.c", "storage.c")
+SOURCES = ("main.c", "parser.c", "execute.c", "storage.c", "bptree.c")
 ERROR_LINE = re.compile(r"^statement (\d+): ([a-z-]+): (.+)$")
 BUILD_TIMEOUT = 300
 RUN_TIMEOUT = 300  # the 128MiB CLI cases read and parse a large file
@@ -464,6 +465,54 @@ class SqlIntegrationTests(unittest.TestCase):
         self.assertEqual(
             out,
             f"INSERT OK id={ids[0]}\n{ids[0]}\tCaseCheck\t20\nSELECT OK rows=1\n",
+        )
+
+    def test_19_id_index_matches_full_scan_after_restart(self):
+        """WHERE id uses the B+ tree index; results must equal the full scan."""
+        work = self.subdir("19")
+        count = 2000  # several leaves at the default order 512
+        sql = "".join(
+            f"INSERT INTO users VALUES ('U{i}', {i % 97});\n" for i in range(count)
+        )
+        rc, out, err = self.run_sql(sql, cwd=work)
+        self.assertEqual(rc, 0, err)
+        ids = self.parse_insert_ids(out)
+        self.assertEqual(len(ids), count, out[-200:])
+
+        # New process: the index is rebuilt from the file on open.
+        rc, out, err = self.run_sql("SELECT * FROM users;", cwd=work)
+        self.assertEqual(rc, 0, err)
+        rows = self.parse_rows(out)
+        self.assertEqual(len(rows), count)
+        by_id = {row[0]: row for row in rows}
+
+        rng = random.Random(19)
+        targets = rng.sample(ids, 200) + [ids[0], ids[-1], max(ids) + 1, max(ids) + 1000]
+        sql = "".join(f"SELECT * FROM users WHERE id = {t};\n" for t in targets)
+        rc, out, err = self.run_sql(sql, cwd=work)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err, "")
+        expected = "".join(
+            (self.format_rows([by_id[t]]) + "SELECT OK rows=1\n")
+            if t in by_id
+            else "SELECT OK rows=0\n"
+            for t in targets
+        )
+        self.assertEqual(out, expected)
+
+        # A row added after the rebuild is found by id in the same process.
+        # Storage gives id = row_index + 1, so the next id is max(ids) + 1.
+        rc, out, err = self.run_sql(
+            "INSERT INTO users VALUES ('Late', 5);\n"
+            f"SELECT * FROM users WHERE id = {max(ids) + 1};\n",
+            cwd=work,
+        )
+        self.assertEqual(rc, 0, err)
+        new_ids = self.parse_insert_ids(out)
+        self.assertEqual(new_ids, [max(ids) + 1], out)
+        self.assertEqual(
+            out,
+            f"INSERT OK id={new_ids[0]}\n{new_ids[0]}\tLate\t5\nSELECT OK rows=1\n",
         )
 
     def test_cli_missing_argument(self):
